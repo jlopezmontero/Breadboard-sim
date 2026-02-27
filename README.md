@@ -2,6 +2,8 @@
 
 Herramienta de visualizacion y planificacion de layouts en perfboard (placa perforada con pads independientes en reticula X*Y). Sub-proyecto de SBC-WALL, pero sirve para cualquier proyecto.
 
+![Breadboard Simulator](screenshot.png)
+
 ## Requisitos
 
 - Python 3.8+
