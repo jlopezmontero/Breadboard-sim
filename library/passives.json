@@ -1,0 +1,29 @@
+{
+  "description": "Additional passive components",
+  "components": [
+    {
+      "type_id": "AXIAL-3",
+      "name": "Resistor (3h)",
+      "ref_prefix": "R",
+      "pins": [[0,0],[0,2]],
+      "body_cells": [[0,1]],
+      "color": "#C4A265"
+    },
+    {
+      "type_id": "AXIAL-7",
+      "name": "Resistor (7h)",
+      "ref_prefix": "R",
+      "pins": [[0,0],[0,6]],
+      "body_cells": [[0,1],[0,2],[0,3],[0,4],[0,5]],
+      "color": "#C4A265"
+    },
+    {
+      "type_id": "DIODE-AX",
+      "name": "Diode Axial",
+      "ref_prefix": "D",
+      "pins": [[0,0],[0,3]],
+      "body_cells": [[0,1],[0,2]],
+      "color": "#1A1A1A"
+    }
+  ]
+}
