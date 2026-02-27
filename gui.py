@@ -143,6 +143,42 @@ class RotateCmd(Command):
                     self.app.board.pads[r][c].occupied_by = self.comp_id
 
 
+class ReplaceLiftedCmd(Command):
+    """Place a lifted (floating) component at a new position/rotation, preserving its id and label."""
+
+    def __init__(self, app, comp_id, comp_def, label, old_row, old_col, old_rot, new_row, new_col, new_rot):
+        self.app = app
+        self.comp_id = comp_id
+        self.comp_def = comp_def
+        self.label = label
+        self.old_row = old_row
+        self.old_col = old_col
+        self.old_rot = old_rot
+        self.new_row = new_row
+        self.new_col = new_col
+        self.new_rot = new_rot
+
+    def execute(self):
+        placed = self.app.board.place_component(
+            self.comp_def, self.new_row, self.new_col, self.new_rot,
+            comp_id=self.comp_id,
+        )
+        if placed:
+            if self.label is not None:
+                placed.label = self.label
+            return True
+        return False
+
+    def undo(self):
+        self.app.board.remove_component(self.comp_id)
+        placed = self.app.board.place_component(
+            self.comp_def, self.old_row, self.old_col, self.old_rot,
+            comp_id=self.comp_id,
+        )
+        if placed and self.label is not None:
+            placed.label = self.label
+
+
 class AddGuideCmd(Command):
     def __init__(self, app, r1, c1, r2, c2, color='#FFFFFF'):
         self.app = app
@@ -342,6 +378,12 @@ class BreadboardApp:
         self.place_comp_def = None
         self.place_rotation = 0
         self.selected_comp_id = None
+        self._lifted_comp_id = None    # id of component lifted for re-placement
+        self._lifted_comp_def = None
+        self._lifted_comp_label = None
+        self._lifted_orig_row = None
+        self._lifted_orig_col = None
+        self._lifted_orig_rot = None
         self._drag_start = None
         self._drag_comp_id = None
         self._drag_orig_row = None
@@ -593,7 +635,10 @@ class BreadboardApp:
         self._mode_changed()
 
     def _mode_changed(self):
-        self.mode = self._mode_var.get()
+        new_mode = self._mode_var.get()
+        if self.mode == MODE_PLACE and new_mode != MODE_PLACE and self._lifted_comp_id:
+            self._restore_lifted()
+        self.mode = new_mode
         if self.mode != MODE_PLACE:
             self.renderer.ghost = None
             self._paste_label = None
@@ -646,6 +691,8 @@ class BreadboardApp:
             self._update_status()
             return
         if self.mode == MODE_PLACE:
+            if self._lifted_comp_id:
+                self._restore_lifted()
             self.mode = MODE_SELECT
             self._mode_var.set(MODE_SELECT)
             self.renderer.ghost = None
@@ -730,15 +777,35 @@ class BreadboardApp:
             return
 
         elif self.mode == MODE_PLACE and self.place_comp_def:
-            cmd = PlaceCmd(self, self.place_comp_def, row, col, self.place_rotation)
-            if self._execute_cmd(cmd):
-                # Apply pasted label if present
-                if self._paste_label and cmd.comp_id:
-                    rename = RenameCmd(self, cmd.comp_id, None, self._paste_label)
-                    self._execute_cmd(rename)
-                self._update_status(f"Placed {cmd.comp_id}")
+            if self._lifted_comp_id:
+                # Re-placing a lifted component — preserve its id and label
+                cmd = ReplaceLiftedCmd(
+                    self,
+                    self._lifted_comp_id, self._lifted_comp_def, self._lifted_comp_label,
+                    self._lifted_orig_row, self._lifted_orig_col, self._lifted_orig_rot,
+                    row, col, self.place_rotation,
+                )
+                if self._execute_cmd(cmd):
+                    placed_id = self._lifted_comp_id
+                    self._clear_lifted()
+                    self.mode = MODE_SELECT
+                    self._mode_var.set(MODE_SELECT)
+                    self.renderer.ghost = None
+                    self.selected_comp_id = placed_id
+                    self.renderer.selected_id = placed_id
+                    self._update_status(f"Placed {placed_id}")
+                else:
+                    self._update_status("Cannot place here - collision or out of bounds")
             else:
-                self._update_status("Cannot place here - collision or out of bounds")
+                cmd = PlaceCmd(self, self.place_comp_def, row, col, self.place_rotation)
+                if self._execute_cmd(cmd):
+                    # Apply pasted label if present
+                    if self._paste_label and cmd.comp_id:
+                        rename = RenameCmd(self, cmd.comp_id, None, self._paste_label)
+                        self._execute_cmd(rename)
+                    self._update_status(f"Placed {cmd.comp_id}")
+                else:
+                    self._update_status("Cannot place here - collision or out of bounds")
             self.renderer.redraw()
 
         elif self.mode == MODE_WIRE:
@@ -959,8 +1026,54 @@ class BreadboardApp:
             if self._execute_cmd(cmd):
                 self._update_status(f"Rotated {self.selected_comp_id}")
             else:
-                self._update_status("Cannot rotate - collision")
+                # No room to rotate in place — lift and enter floating mode
+                self._lift_for_rotation(self.selected_comp_id)
             self.renderer.redraw()
+
+    def _lift_for_rotation(self, comp_id):
+        """Remove component from board and enter floating place mode so the user
+        can choose where to drop it at its new rotation."""
+        pc = self.board.components.get(comp_id)
+        if not pc:
+            return
+        self._lifted_comp_id = pc.id
+        self._lifted_comp_def = pc.comp_def
+        self._lifted_comp_label = pc.label
+        self._lifted_orig_row = pc.anchor_row
+        self._lifted_orig_col = pc.anchor_col
+        self._lifted_orig_rot = pc.rotation
+        self.board.remove_component(pc.id)
+        self.place_comp_def = pc.comp_def
+        self.place_rotation = (pc.rotation + 90) % 360
+        self._paste_label = None
+        self.mode = MODE_PLACE
+        self._mode_var.set(MODE_PLACE)
+        # Show ghost immediately at the original position with the new rotation
+        new_rot = self.place_rotation
+        valid = self.board.can_place(pc.comp_def, self._lifted_orig_row, self._lifted_orig_col, new_rot)
+        self.renderer.ghost = (pc.comp_def, self._lifted_orig_row, self._lifted_orig_col, new_rot, valid)
+        self._update_status(f"Rotate {self._lifted_comp_id}: choose position (Esc to cancel)")
+
+    def _clear_lifted(self):
+        self._lifted_comp_id = None
+        self._lifted_comp_def = None
+        self._lifted_comp_label = None
+        self._lifted_orig_row = None
+        self._lifted_orig_col = None
+        self._lifted_orig_rot = None
+
+    def _restore_lifted(self):
+        """Put a lifted component back at its original position (used on Esc / mode switch)."""
+        if not self._lifted_comp_id:
+            return
+        placed = self.board.place_component(
+            self._lifted_comp_def,
+            self._lifted_orig_row, self._lifted_orig_col, self._lifted_orig_rot,
+            comp_id=self._lifted_comp_id,
+        )
+        if placed and self._lifted_comp_label is not None:
+            placed.label = self._lifted_comp_label
+        self._clear_lifted()
 
     # ── Undo/Redo ──
 
