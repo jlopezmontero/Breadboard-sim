@@ -399,6 +399,7 @@ class Board:
             comp_data.append((
                 pc.id, pc.comp_def,
                 pc.anchor_row, pc.anchor_col, pc.rotation,
+                pc.label,
             ))
         # Save guide and division state
         guide_data = [(gl.r1, gl.c1, gl.r2, gl.c2, gl.color) for gl in self.guides]
@@ -412,11 +413,13 @@ class Board:
         self.pads = [[Pad(r, c) for c in range(new_cols)] for r in range(new_rows)]
 
         # Re-place with transformed coordinates
-        for comp_id, comp_def, ar, ac, rot in comp_data:
+        for comp_id, comp_def, ar, ac, rot, label in comp_data:
             new_ar = ac
             new_ac = (old_rows - 1) - ar
             new_rot = (rot + 90) % 360
-            self.place_component(comp_def, new_ar, new_ac, new_rot, comp_id=comp_id)
+            placed = self.place_component(comp_def, new_ar, new_ac, new_rot, comp_id=comp_id)
+            if placed and label is not None:
+                placed.label = label
 
         # Re-add guides with transformed coordinates
         for r1, c1, r2, c2, color in guide_data:
