@@ -9,7 +9,7 @@ import math
 import os
 import sys
 
-from board import Board
+from board import Board, PlacedComponent
 from components import BUILTIN_COMPONENTS
 from component_library import ComponentLibrary
 from renderer import BoardRenderer
@@ -179,6 +179,80 @@ class ReplaceLiftedCmd(Command):
             placed.label = self.label
 
 
+class MultiDeleteCmd(Command):
+    """Delete multiple components as one undoable action."""
+
+    def __init__(self, app, comp_ids):
+        self.app = app
+        self.comp_ids = list(comp_ids)
+        self.saved = {}  # comp_id -> (comp_def, row, col, rot, label)
+
+    def execute(self):
+        for cid in self.comp_ids:
+            pc = self.app.board.components.get(cid)
+            if pc:
+                self.saved[cid] = (pc.comp_def, pc.anchor_row, pc.anchor_col,
+                                   pc.rotation, pc.label)
+                self.app.board.remove_component(cid)
+        return bool(self.saved)
+
+    def undo(self):
+        for cid, (comp_def, row, col, rot, label) in self.saved.items():
+            placed = self.app.board.place_component(comp_def, row, col, rot, comp_id=cid)
+            if placed and label is not None:
+                placed.label = label
+
+
+class MultiMoveCmd(Command):
+    """Move multiple components simultaneously as one undoable action."""
+
+    def __init__(self, app, entries):
+        # entries: list of (comp_id, comp_def, label, rotation, old_r, old_c, new_r, new_c)
+        self.app = app
+        self.entries = entries
+
+    def _place_all(self, use_new):
+        for e in self.entries:
+            self.app.board.remove_component(e[0])
+        for comp_id, comp_def, label, rotation, old_r, old_c, new_r, new_c in self.entries:
+            r, c = (new_r, new_c) if use_new else (old_r, old_c)
+            placed = self.app.board.place_component(comp_def, r, c, rotation, comp_id=comp_id)
+            if placed and label is not None:
+                placed.label = label
+
+    def execute(self):
+        self._place_all(use_new=True)
+        return True
+
+    def undo(self):
+        self._place_all(use_new=False)
+
+
+class MultiRotateCmd(Command):
+    """Rotate multiple components simultaneously as one undoable action."""
+
+    def __init__(self, app, entries):
+        # entries: list of (comp_id, comp_def, label, old_r, old_c, old_rot, new_r, new_c, new_rot)
+        self.app = app
+        self.entries = entries
+
+    def _place_all(self, use_new):
+        for e in self.entries:
+            self.app.board.remove_component(e[0])
+        for comp_id, comp_def, label, old_r, old_c, old_rot, new_r, new_c, new_rot in self.entries:
+            r, c, rot = (new_r, new_c, new_rot) if use_new else (old_r, old_c, old_rot)
+            placed = self.app.board.place_component(comp_def, r, c, rot, comp_id=comp_id)
+            if placed and label is not None:
+                placed.label = label
+
+    def execute(self):
+        self._place_all(use_new=True)
+        return True
+
+    def undo(self):
+        self._place_all(use_new=False)
+
+
 class AddGuideCmd(Command):
     def __init__(self, app, r1, c1, r2, c2, color='#FFFFFF'):
         self.app = app
@@ -325,16 +399,24 @@ class MoveDivisionCmd(Command):
 
 
 class RenameCmd(Command):
-    def __init__(self, app, comp_id, old_label, new_label):
+    def __init__(self, app, comp_id, old_label, new_label,
+                 old_size=None, new_size=None,
+                 old_align='center', new_align='center'):
         self.app = app
         self.comp_id = comp_id
         self.old_label = old_label
         self.new_label = new_label
+        self.old_size = old_size
+        self.new_size = new_size
+        self.old_align = old_align
+        self.new_align = new_align
 
     def execute(self):
         pc = self.app.board.components.get(self.comp_id)
         if pc:
             pc.label = self.new_label
+            pc.label_size = self.new_size
+            pc.label_align = self.new_align
             return True
         return False
 
@@ -342,6 +424,383 @@ class RenameCmd(Command):
         pc = self.app.board.components.get(self.comp_id)
         if pc:
             pc.label = self.old_label
+            pc.label_size = self.old_size
+            pc.label_align = self.old_align
+
+
+# ── Free text label commands ──
+
+class AddTextLabelCmd(Command):
+    def __init__(self, app, row, col, props):
+        self.app = app
+        self.row = row
+        self.col = col
+        self.props = props
+        self.label_id = None
+
+    def execute(self):
+        tl = self.app.board.add_text_label(self.row, self.col, self.props.get('text', ''))
+        tl.size = self.props.get('size')
+        tl.align = self.props.get('align', 'center')
+        tl.opacity = self.props.get('opacity', 100)
+        tl.layer = self.props.get('layer', 'above')
+        tl.color = self.props.get('color', '#E0E0E0')
+        tl.bg_color = self.props.get('bg_color', '#000000')
+        tl.border_color = self.props.get('border_color', '')
+        self.label_id = tl.id
+        return True
+
+    def undo(self):
+        if self.label_id:
+            self.app.board.remove_text_label(self.label_id)
+
+
+class DeleteTextLabelCmd(Command):
+    def __init__(self, app, label_id):
+        self.app = app
+        self.label_id = label_id
+        self._saved = None
+
+    def execute(self):
+        tl = self.app.board.get_text_label(self.label_id)
+        if tl:
+            self._saved = tl.to_dict()
+            self.app.board.remove_text_label(self.label_id)
+            return True
+        return False
+
+    def undo(self):
+        if self._saved:
+            from board import TextLabel
+            tl = TextLabel.from_dict(self._saved)
+            self.app.board.text_labels.append(tl)
+
+
+class MoveTextLabelCmd(Command):
+    def __init__(self, app, label_id, old_row, old_col, new_row, new_col):
+        self.app = app
+        self.label_id = label_id
+        self.old_row, self.old_col = old_row, old_col
+        self.new_row, self.new_col = new_row, new_col
+
+    def execute(self):
+        tl = self.app.board.get_text_label(self.label_id)
+        if tl:
+            tl.row, tl.col = self.new_row, self.new_col
+            return True
+        return False
+
+    def undo(self):
+        tl = self.app.board.get_text_label(self.label_id)
+        if tl:
+            tl.row, tl.col = self.old_row, self.old_col
+
+
+class EditTextLabelCmd(Command):
+    def __init__(self, app, label_id, old_props, new_props):
+        self.app = app
+        self.label_id = label_id
+        self.old_props = old_props
+        self.new_props = new_props
+
+    def _apply(self, props):
+        tl = self.app.board.get_text_label(self.label_id)
+        if tl:
+            tl.text = props['text']
+            tl.size = props.get('size')
+            tl.align = props.get('align', 'center')
+            tl.opacity = props.get('opacity', 100)
+            tl.layer = props.get('layer', 'above')
+            tl.color = props.get('color', '#E0E0E0')
+            tl.bg_color = props.get('bg_color', '#000000')
+            tl.border_color = props.get('border_color', '')
+
+    def execute(self):
+        self._apply(self.new_props)
+        return True
+
+    def undo(self):
+        self._apply(self.old_props)
+
+
+class RotateTextLabelCmd(Command):
+    def __init__(self, app, label_id, old_rot, new_rot):
+        self.app = app
+        self.label_id = label_id
+        self.old_rot = old_rot
+        self.new_rot = new_rot
+
+    def execute(self):
+        tl = self.app.board.get_text_label(self.label_id)
+        if tl:
+            tl.rotation = self.new_rot
+            return True
+        return False
+
+    def undo(self):
+        tl = self.app.board.get_text_label(self.label_id)
+        if tl:
+            tl.rotation = self.old_rot
+
+
+# ── Label edit dialog ──
+
+_LABEL_FONT_SIZES = ['auto', '6', '7', '8', '9', '10', '11', '12', '14',
+                     '16', '18', '20', '24', '28', '32', '36', '48', '60', '72']
+
+
+class LabelEditDialog(tk.Toplevel):
+    """Custom dialog for editing a component label (multi-line), font size and alignment."""
+
+    def __init__(self, parent, title, prompt, initial_text='',
+                 initial_size=None, initial_align='center'):
+        super().__init__(parent)
+        self.result_text = None   # None = cancelled
+        self.result_size = None
+        self.result_align = 'center'
+
+        self.title(title)
+        self.resizable(False, False)
+        self.transient(parent)
+        self.grab_set()
+
+        # Prompt label
+        tk.Label(self, text=prompt, anchor='w', justify='left').pack(
+            fill='x', padx=10, pady=(10, 2))
+
+        # Multi-line text area
+        txt_frame = tk.Frame(self)
+        txt_frame.pack(fill='both', expand=True, padx=10)
+        self._text = tk.Text(txt_frame, width=32, height=5, wrap='word',
+                             font=('Consolas', 10), relief='sunken', bd=1)
+        sb = tk.Scrollbar(txt_frame, command=self._text.yview)
+        self._text.config(yscrollcommand=sb.set)
+        self._text.pack(side='left', fill='both', expand=True)
+        sb.pack(side='right', fill='y')
+        if initial_text:
+            self._text.insert('1.0', initial_text)
+        self._text.tag_add('sel', '1.0', 'end')
+        self._text.focus_set()
+
+        # Hint
+        tk.Label(self, text='Enter = new line    Ctrl+Enter = confirm',
+                 fg='#888888', font=('TkDefaultFont', 8)).pack(
+            anchor='w', padx=10)
+
+        # Font size + alignment row
+        opts_frame = tk.Frame(self)
+        opts_frame.pack(fill='x', padx=10, pady=6)
+
+        tk.Label(opts_frame, text='Size:').pack(side='left')
+        self._size_var = tk.StringVar()
+        size_cb = ttk.Combobox(opts_frame, textvariable=self._size_var,
+                               values=_LABEL_FONT_SIZES, width=7, state='readonly')
+        size_cb.pack(side='left', padx=(4, 14))
+        self._size_var.set('auto' if initial_size is None else str(initial_size))
+
+        tk.Label(opts_frame, text='Align:').pack(side='left')
+        self._align_var = tk.StringVar(value=initial_align)
+        for val, symbol in (('left', '◀ Left'), ('center', '● Center'), ('right', 'Right ▶')):
+            tk.Radiobutton(opts_frame, text=symbol, variable=self._align_var,
+                           value=val).pack(side='left', padx=2)
+
+        # OK / Cancel buttons
+        btn_frame = tk.Frame(self)
+        btn_frame.pack(fill='x', padx=10, pady=(0, 10))
+        tk.Button(btn_frame, text='OK', command=self._ok, width=9).pack(side='right', padx=2)
+        tk.Button(btn_frame, text='Cancel', command=self.destroy, width=9).pack(side='right', padx=2)
+
+        self.bind('<Escape>', lambda e: self.destroy())
+        self._text.bind('<Control-Return>', lambda e: self._ok())
+
+        # Centre over parent
+        self.update_idletasks()
+        pw, ph = parent.winfo_width(), parent.winfo_height()
+        px, py = parent.winfo_rootx(), parent.winfo_rooty()
+        w, h = self.winfo_width(), self.winfo_height()
+        self.geometry(f'+{px + (pw - w) // 2}+{py + (ph - h) // 2}')
+
+        self.wait_window(self)
+
+    def _ok(self):
+        self.result_text = self._text.get('1.0', 'end-1c')
+        sv = self._size_var.get()
+        self.result_size = None if sv == 'auto' else int(sv)
+        self.result_align = self._align_var.get()
+        self.destroy()
+
+
+# ── Free text label dialog ──
+
+_SWATCH_COLORS = [
+    ('#E0E0E0', 'Light Gray'), ('#FFFFFF', 'White'),
+    ('#FFFF00', 'Yellow'),     ('#FF9900', 'Orange'),
+    ('#FF4444', 'Red'),        ('#44FF44', 'Green'),
+    ('#44AAFF', 'Blue'),       ('#000000', 'Black'),
+    ('#4444CC', 'Dark Blue'),  ('#228B22', 'Dark Green'),
+    ('#CC3333', 'Dark Red'),   ('#888888', 'Gray'),
+    ('#CC8800', 'Amber'),      ('#884488', 'Purple'),
+    ('#008888', 'Teal'),
+]
+
+
+class TextLabelDialog(tk.Toplevel):
+    """Dialog to create / edit a free-floating board text label."""
+
+    def __init__(self, parent, title='Text Label', initial=None):
+        super().__init__(parent)
+        if initial is None:
+            initial = {}
+        self.result = None   # None = cancelled, else dict
+
+        self.title(title)
+        self.resizable(False, False)
+        self.transient(parent)
+        self.grab_set()
+
+        # Text area
+        tk.Label(self, text='Text:', anchor='w').pack(fill='x', padx=10, pady=(10, 2))
+        txt_frame = tk.Frame(self)
+        txt_frame.pack(fill='both', expand=True, padx=10)
+        self._text = tk.Text(txt_frame, width=34, height=5, wrap='word',
+                             font=('Consolas', 10), relief='sunken', bd=1)
+        sb = tk.Scrollbar(txt_frame, command=self._text.yview)
+        self._text.config(yscrollcommand=sb.set)
+        self._text.pack(side='left', fill='both', expand=True)
+        sb.pack(side='right', fill='y')
+        if initial.get('text'):
+            self._text.insert('1.0', initial['text'])
+        self._text.tag_add('sel', '1.0', 'end')
+        self._text.focus_set()
+        tk.Label(self, text='Enter = new line    Ctrl+Enter = confirm',
+                 fg='#888888', font=('TkDefaultFont', 8)).pack(anchor='w', padx=10)
+
+        # Row 1: size + alignment
+        r1 = tk.Frame(self)
+        r1.pack(fill='x', padx=10, pady=(6, 2))
+        tk.Label(r1, text='Size:').pack(side='left')
+        self._size_var = tk.StringVar()
+        ttk.Combobox(r1, textvariable=self._size_var, values=_LABEL_FONT_SIZES,
+                     width=7, state='readonly').pack(side='left', padx=(4, 14))
+        self._size_var.set('auto' if initial.get('size') is None else str(initial['size']))
+        tk.Label(r1, text='Align:').pack(side='left')
+        self._align_var = tk.StringVar(value=initial.get('align', 'center'))
+        for val, sym in (('left', '◀ Left'), ('center', '● Ctr'), ('right', 'Right ▶')):
+            tk.Radiobutton(r1, text=sym, variable=self._align_var,
+                           value=val).pack(side='left', padx=2)
+
+        # Row 2: background opacity + layer
+        r2 = tk.Frame(self)
+        r2.pack(fill='x', padx=10, pady=(2, 2))
+        tk.Label(r2, text='BG opacity:').pack(side='left')
+        self._opacity_var = tk.IntVar(value=initial.get('opacity', 100))
+        tk.Scale(r2, from_=0, to=100, orient='horizontal', variable=self._opacity_var,
+                 length=110, showvalue=True).pack(side='left', padx=(4, 14))
+        tk.Label(r2, text='Layer:').pack(side='left')
+        self._layer_var = tk.StringVar(value=initial.get('layer', 'above'))
+        tk.Radiobutton(r2, text='Above comps', variable=self._layer_var,
+                       value='above').pack(side='left', padx=2)
+        tk.Radiobutton(r2, text='Below comps', variable=self._layer_var,
+                       value='below').pack(side='left', padx=2)
+
+        # Three color rows share a grid so column 0 auto-sizes to the widest label
+        # and all swatch columns start at the same x position.
+        cgrid = tk.Frame(self)
+        cgrid.pack(fill='x', padx=10, pady=(2, 8))
+
+        def _swatches_frame(parent, grid_row):
+            f = tk.Frame(parent)
+            f.grid(row=grid_row, column=1, sticky='w', pady=2)
+            return f
+
+        # Row 0: Text color
+        tk.Label(cgrid, text='Text color:', anchor='w').grid(
+            row=0, column=0, sticky='w', padx=(0, 6), pady=2)
+        r3 = _swatches_frame(cgrid, 0)
+        self._color_var = tk.StringVar(value=initial.get('color', '#E0E0E0'))
+        self._color_btns = {}
+        for hex_c, _ in _SWATCH_COLORS:
+            btn = tk.Button(r3, width=2, height=1, bg=hex_c, activebackground=hex_c,
+                            relief='sunken' if hex_c == self._color_var.get() else 'raised',
+                            bd=2, command=lambda c=hex_c: self._pick_color('color', c))
+            btn.pack(side='left', padx=1)
+            self._color_btns[hex_c] = btn
+
+        # Row 1: BG color
+        tk.Label(cgrid, text='BG color:', anchor='w').grid(
+            row=1, column=0, sticky='w', padx=(0, 6), pady=2)
+        r4 = _swatches_frame(cgrid, 1)
+        self._bg_color_var = tk.StringVar(value=initial.get('bg_color', '#000000'))
+        self._bg_color_btns = {}
+        for hex_c, _ in _SWATCH_COLORS:
+            btn = tk.Button(r4, width=2, height=1, bg=hex_c, activebackground=hex_c,
+                            relief='sunken' if hex_c == self._bg_color_var.get() else 'raised',
+                            bd=2, command=lambda c=hex_c: self._pick_color('bg', c))
+            btn.pack(side='left', padx=1)
+            self._bg_color_btns[hex_c] = btn
+
+        # Row 2: Border — label + ╳ share column 0, swatches in column 1
+        border_prefix = tk.Frame(cgrid)
+        border_prefix.grid(row=2, column=0, sticky='w', pady=2)
+        tk.Label(border_prefix, text='Border:', anchor='w').pack(side='left')
+        self._border_color_var = tk.StringVar(value=initial.get('border_color', ''))
+        self._border_color_btns = {}
+        no_btn = tk.Button(border_prefix, text='╳', width=2, height=1,
+                           relief='sunken' if self._border_color_var.get() == '' else 'raised',
+                           bd=2, command=lambda: self._pick_color('border', ''))
+        no_btn.pack(side='left', padx=(6, 0))
+        self._border_color_btns[''] = no_btn
+        r5 = _swatches_frame(cgrid, 2)
+        for hex_c, _ in _SWATCH_COLORS:
+            btn = tk.Button(r5, width=2, height=1, bg=hex_c, activebackground=hex_c,
+                            relief='sunken' if hex_c == self._border_color_var.get() else 'raised',
+                            bd=2, command=lambda c=hex_c: self._pick_color('border', c))
+            btn.pack(side='left', padx=1)
+            self._border_color_btns[hex_c] = btn
+
+        # Buttons
+        bf = tk.Frame(self)
+        bf.pack(fill='x', padx=10, pady=(0, 10))
+        tk.Button(bf, text='OK', command=self._ok, width=9).pack(side='right', padx=2)
+        tk.Button(bf, text='Cancel', command=self.destroy, width=9).pack(side='right', padx=2)
+
+        self.bind('<Escape>', lambda e: self.destroy())
+        self._text.bind('<Control-Return>', lambda e: self._ok())
+
+        self.update_idletasks()
+        pw, ph = parent.winfo_width(), parent.winfo_height()
+        px, py = parent.winfo_rootx(), parent.winfo_rooty()
+        w, h = self.winfo_width(), self.winfo_height()
+        self.geometry(f'+{px + (pw - w) // 2}+{py + (ph - h) // 2}')
+        self.wait_window(self)
+
+    def _pick_color(self, which, color):
+        if which == 'color':
+            for c, btn in self._color_btns.items():
+                btn.config(relief='sunken' if c == color else 'raised')
+            self._color_var.set(color)
+        elif which == 'bg':
+            for c, btn in self._bg_color_btns.items():
+                btn.config(relief='sunken' if c == color else 'raised')
+            self._bg_color_var.set(color)
+        elif which == 'border':
+            for c, btn in self._border_color_btns.items():
+                btn.config(relief='sunken' if c == color else 'raised')
+            self._border_color_var.set(color)
+
+    def _ok(self):
+        sv = self._size_var.get()
+        self.result = {
+            'text':         self._text.get('1.0', 'end-1c'),
+            'size':         None if sv == 'auto' else int(sv),
+            'align':        self._align_var.get(),
+            'opacity':      self._opacity_var.get(),
+            'layer':        self._layer_var.get(),
+            'color':        self._color_var.get(),
+            'bg_color':     self._bg_color_var.get(),
+            'border_color': self._border_color_var.get(),
+        }
+        self.destroy()
 
 
 # ── Board size presets ──
@@ -377,7 +836,7 @@ class BreadboardApp:
         self.mode = MODE_SELECT
         self.place_comp_def = None
         self.place_rotation = 0
-        self.selected_comp_id = None
+        self.selected_comp_ids = set()   # set of currently selected component IDs
         self._lifted_comp_id = None    # id of component lifted for re-placement
         self._lifted_comp_def = None
         self._lifted_comp_label = None
@@ -388,6 +847,16 @@ class BreadboardApp:
         self._drag_comp_id = None
         self._drag_orig_row = None
         self._drag_orig_col = None
+        self._drag_orig_positions = {}    # {comp_id: (orig_row, orig_col)} for multi-drag
+        self._drag_orig_center_row = None  # visual center of anchor comp (or group centroid)
+        self._drag_orig_center_col = None
+        self._drag_started_moving = False  # True once cursor crossed 5-px threshold
+        self._pending_single_select = None  # comp_id to collapse to on click-without-drag
+        self._rubberband_start = None     # (canvas_x, canvas_y) rubber-band origin
+        # Multi-ghost state (used when rotating a group with collisions)
+        self._multi_ghost_entries = []    # list of dicts with comp ghost state
+        self._multi_ghost_ref_row = None  # group centroid row at ghost-start
+        self._multi_ghost_ref_col = None  # group centroid col at ghost-start
         self._paste_label = None     # label to apply after paste-place
         self._wire_color = '#FFFFFF'  # currently selected wire color
         self._wire_start = None      # (row, col) of wire start pad
@@ -395,6 +864,13 @@ class BreadboardApp:
         self._drag_div_idx = -1      # index of division being dragged
         self._drag_div_orig = None   # (r1, c1, r2, c2) before drag
         self._file_lock_path = None  # filepath currently holding our lock
+        # Free text label interaction
+        self._selected_text_label_id = None
+        self._drag_text_label_id = None
+        self._ghost_text_label_props = None  # props dict while positioning a new label
+        self._drag_text_label_orig = None   # (row, col) at drag start
+        self._drag_text_label_click = None  # (float_row, float_col) of cursor at click
+        self._drag_text_label_started = False
 
         # Undo/redo
         self._undo_stack = []
@@ -512,6 +988,9 @@ class BreadboardApp:
                    command=lambda: self.renderer.zoom_in()).pack(side=tk.LEFT, padx=1)
         ttk.Button(tb2, text="\u2013", width=3,
                    command=lambda: self.renderer.zoom_out()).pack(side=tk.LEFT, padx=1)
+        ttk.Separator(tb2, orient='vertical').pack(side=tk.LEFT, padx=4, fill='y')
+        ttk.Button(tb2, text="T+", width=4,
+                   command=self._add_text_label).pack(side=tk.LEFT, padx=1)
 
         # Wire color palette
         color_frame = ttk.Frame(palette_frame)
@@ -626,6 +1105,8 @@ class BreadboardApp:
         self.root.bind('<Down>', lambda e: self._move_selected(1, 0))
         self.root.bind('<Left>', lambda e: self._move_selected(0, -1))
         self.root.bind('<Right>', lambda e: self._move_selected(0, 1))
+        self.root.bind('<Control-a>', lambda e: self._select_all())
+        self.root.bind('<Control-A>', lambda e: self._select_all())
 
     # ── Mode handling ──
 
@@ -636,11 +1117,15 @@ class BreadboardApp:
 
     def _mode_changed(self):
         new_mode = self._mode_var.get()
-        if self.mode == MODE_PLACE and new_mode != MODE_PLACE and self._lifted_comp_id:
-            self._restore_lifted()
+        if self.mode == MODE_PLACE and new_mode != MODE_PLACE:
+            if self._multi_ghost_entries:
+                self._restore_multi_ghost()
+            elif self._lifted_comp_id:
+                self._restore_lifted()
         self.mode = new_mode
         if self.mode != MODE_PLACE:
             self.renderer.ghost = None
+            self.renderer.multi_ghost = None
             self._paste_label = None
         if self.mode != MODE_WIRE:
             self._wire_start = None
@@ -649,8 +1134,7 @@ class BreadboardApp:
             self._division_start = None
             self.renderer.division_preview = None
         if self.mode != MODE_SELECT:
-            self.selected_comp_id = None
-            self.renderer.selected_id = None
+            self._clear_selection()
             self.renderer.selected_division = -1
             self._drag_div_idx = -1
         cursors = {MODE_DELETE: 'X_cursor', MODE_WIRE: 'pencil', MODE_DIVIDE: 'tcross'}
@@ -667,6 +1151,12 @@ class BreadboardApp:
 
     def _cancel(self):
         """Escape / right-click: cancel current operation or exit mode."""
+        if self._ghost_text_label_props is not None:
+            self._ghost_text_label_props = None
+            self.renderer.text_label_ghost = None
+            self.renderer.redraw()
+            self._update_status()
+            return
         if self.mode == MODE_WIRE and self._wire_start:
             self._wire_start = None
             self.renderer.guide_preview = None
@@ -691,14 +1181,17 @@ class BreadboardApp:
             self._update_status()
             return
         if self.mode == MODE_PLACE:
-            if self._lifted_comp_id:
+            if self._multi_ghost_entries:
+                self._restore_multi_ghost()
+            elif self._lifted_comp_id:
                 self._restore_lifted()
             self.mode = MODE_SELECT
             self._mode_var.set(MODE_SELECT)
             self.renderer.ghost = None
+            self.renderer.multi_ghost = None
             self.renderer.redraw()
-        self.selected_comp_id = None
-        self.renderer.selected_id = None
+        # In SELECT mode, Esc clears selection
+        self._clear_selection()
         self.renderer.redraw()
         self._update_status()
 
@@ -734,23 +1227,42 @@ class BreadboardApp:
             return (er, sc)  # vertical: same col
 
     def _on_double_click(self, event):
-        """Double-click on a component to rename it."""
+        """Double-click: edit text label, rename component, or create text label on empty space."""
         row, col = self.renderer.canvas_to_grid(event.x, event.y)
-        pc = self.board.get_component_at(row, col)
-        if pc is None:
+        # 'above' labels take priority over components; 'below' labels only if no component
+        tl = self._get_text_label_at(event.x, event.y, layer='above')
+        pc = self.board.get_component_at(row, col) if tl is None else None
+        if tl is None and pc is None:
+            tl = self._get_text_label_at(event.x, event.y, layer='below')
+        if tl:
+            self._edit_text_label(tl)
             return
-        current = pc.label or pc.id
-        new_label = simpledialog.askstring(
-            "Rename Component",
-            f"Label for {pc.id} ({pc.comp_def.name}):",
-            initialvalue=current,
-            parent=self.root
+
+        if pc is None:
+            # Double-click on empty board → create new text label
+            self._rubberband_start = None
+            self.renderer.selection_rect = None
+            self._add_text_label(event.x, event.y)
+            return
+        # Only rename when this component is the sole selection
+        if len(self.selected_comp_ids) > 1:
+            return
+        dlg = LabelEditDialog(
+            self.root,
+            title="Edit Label",
+            prompt=f"{pc.id}  ({pc.comp_def.name})",
+            initial_text=pc.label or pc.id,
+            initial_size=pc.label_size,
+            initial_align=pc.label_align,
         )
-        if new_label is not None:
-            new_label = new_label.strip() or None
-            old_label = pc.label
-            if new_label != old_label:
-                cmd = RenameCmd(self, pc.id, old_label, new_label)
+        if dlg.result_text is not None:
+            new_label = dlg.result_text.strip() or None
+            new_size = dlg.result_size
+            new_align = dlg.result_align
+            old_label, old_size, old_align = pc.label, pc.label_size, pc.label_align
+            if new_label != old_label or new_size != old_size or new_align != old_align:
+                cmd = RenameCmd(self, pc.id, old_label, new_label,
+                                old_size, new_size, old_align, new_align)
                 self._execute_cmd(cmd)
                 self.renderer.redraw()
 
@@ -776,14 +1288,45 @@ class BreadboardApp:
                 self.renderer.redraw()
             return
 
+        elif self.mode == MODE_PLACE and self._multi_ghost_entries:
+            # Multi-ghost placement: place all components at offset positions
+            dr = row - self._multi_ghost_ref_row
+            dc = col - self._multi_ghost_ref_col
+            entries = []
+            for e in self._multi_ghost_entries:
+                gr = self._clamp_to_board(e['base_row'] + dr, e['base_col'] + dc)[0]
+                gc = self._clamp_to_board(e['base_row'] + dr, e['base_col'] + dc)[1]
+                entries.append((e['comp_id'], e['comp_def'], e['label'],
+                                e['old_row'], e['old_col'], e['old_rot'],
+                                gr, gc, e['new_rot']))
+            all_valid = all(
+                self.board.can_place(comp_def, gr, gc, new_rot)
+                for _, comp_def, _, _, _, _, gr, gc, new_rot in entries
+            )
+            if all_valid:
+                cmd = MultiRotateCmd(self, entries)
+                self._execute_cmd(cmd)
+                self._clear_multi_ghost()
+                self._set_selection({e[0] for e in entries})
+                self._set_mode(MODE_SELECT)
+                self._update_status(f"Rotated {len(entries)} component(s)")
+            else:
+                self._update_status("Cannot place here — collision or out of bounds")
+            self.renderer.redraw()
+
         elif self.mode == MODE_PLACE and self.place_comp_def:
+            # Use ghost's pre-computed center-adjusted anchor instead of raw cursor position
+            if self.renderer.ghost:
+                _, place_row, place_col, _, _ = self.renderer.ghost
+            else:
+                place_row, place_col = row, col
             if self._lifted_comp_id:
                 # Re-placing a lifted component — preserve its id and label
                 cmd = ReplaceLiftedCmd(
                     self,
                     self._lifted_comp_id, self._lifted_comp_def, self._lifted_comp_label,
                     self._lifted_orig_row, self._lifted_orig_col, self._lifted_orig_rot,
-                    row, col, self.place_rotation,
+                    place_row, place_col, self.place_rotation,
                 )
                 if self._execute_cmd(cmd):
                     placed_id = self._lifted_comp_id
@@ -791,13 +1334,12 @@ class BreadboardApp:
                     self.mode = MODE_SELECT
                     self._mode_var.set(MODE_SELECT)
                     self.renderer.ghost = None
-                    self.selected_comp_id = placed_id
-                    self.renderer.selected_id = placed_id
+                    self._set_selection({placed_id})
                     self._update_status(f"Placed {placed_id}")
                 else:
                     self._update_status("Cannot place here - collision or out of bounds")
             else:
-                cmd = PlaceCmd(self, self.place_comp_def, row, col, self.place_rotation)
+                cmd = PlaceCmd(self, self.place_comp_def, place_row, place_col, self.place_rotation)
                 if self._execute_cmd(cmd):
                     # Apply pasted label if present
                     if self._paste_label and cmd.comp_id:
@@ -853,18 +1395,87 @@ class BreadboardApp:
                         self.renderer.redraw()
 
         elif self.mode == MODE_SELECT:
-            pc = self.board.get_component_at(row, col)
+            # Place pending text label ghost
+            if self._ghost_text_label_props is not None:
+                row_f, col_f = self.renderer.canvas_to_grid_float(event.x, event.y)
+                cmd = AddTextLabelCmd(self, row_f, col_f, self._ghost_text_label_props)
+                if self._execute_cmd(cmd):
+                    self._select_text_label(cmd.label_id)
+                    self._update_status(f"Added text label {cmd.label_id}")
+                self._ghost_text_label_props = None
+                self.renderer.text_label_ghost = None
+                self.renderer.redraw()
+                return
+
+            # Hit-test respects visual layer order:
+            # 1. 'above' text labels (rendered on top)
+            # 2. components
+            # 3. 'below' text labels (rendered under components)
+            tl = self._get_text_label_at(event.x, event.y, layer='above')
+            pc = self.board.get_component_at(row, col) if tl is None else None
+            if tl is None and pc is None:
+                tl = self._get_text_label_at(event.x, event.y, layer='below')
+
+            if tl:
+                self._deselect_text_label()
+                self._select_text_label(tl.id)
+                self._drag_text_label_id = tl.id
+                self._drag_text_label_orig = (tl.row, tl.col)
+                rf, cf = self.renderer.canvas_to_grid_float(event.x, event.y)
+                self._drag_text_label_click = (rf, cf)
+                self._drag_text_label_started = False
+                self._drag_start = (event.x, event.y)
+                self._update_status(f"Text label {tl.id} — drag to move, double-click to edit")
+                self.renderer.redraw()
+                return
+
             if pc:
-                self.selected_comp_id = pc.id
-                self.renderer.selected_id = pc.id
+                self._deselect_text_label()
+                ctrl = bool(event.state & 0x4)
+                if ctrl:
+                    # Ctrl+click: toggle immediately
+                    if pc.id in self.selected_comp_ids:
+                        self.selected_comp_ids.discard(pc.id)
+                        self.renderer.selected_ids.discard(pc.id)
+                    else:
+                        self.selected_comp_ids.add(pc.id)
+                        self.renderer.selected_ids.add(pc.id)
+                    self._pending_single_select = None
+                elif pc.id in self.selected_comp_ids and len(self.selected_comp_ids) > 1:
+                    # Clicking on an already-selected member of a group:
+                    # keep full selection for dragging, defer collapse to mouseup
+                    self._pending_single_select = pc.id
+                else:
+                    # Clicking on unselected component: replace selection immediately
+                    self._set_selection({pc.id})
+                    self._pending_single_select = None
                 self.renderer.selected_division = -1
                 self._drag_div_idx = -1
                 self._drag_start = (event.x, event.y)
                 self._drag_comp_id = pc.id
                 self._drag_orig_row = pc.anchor_row
                 self._drag_orig_col = pc.anchor_col
-                desc = pc.label or pc.id
-                self._update_status(f"Selected {desc} ({pc.comp_def.name})")
+                self._drag_orig_positions = {
+                    cid: (self.board.components[cid].anchor_row,
+                          self.board.components[cid].anchor_col)
+                    for cid in self.selected_comp_ids if cid in self.board.components
+                }
+                # Compute drag reference: group centroid (multi) or single center
+                if len(self.selected_comp_ids) > 1:
+                    all_ctr = [self._component_center(self.board.components[cid])
+                               for cid in self.selected_comp_ids
+                               if cid in self.board.components]
+                    self._drag_orig_center_row = sum(r for r, c in all_ctr) / len(all_ctr)
+                    self._drag_orig_center_col = sum(c for r, c in all_ctr) / len(all_ctr)
+                else:
+                    self._drag_orig_center_row, self._drag_orig_center_col = self._component_center(pc)
+                self._drag_started_moving = False
+                n = len(self.selected_comp_ids)
+                if n > 1:
+                    self._update_status(f"{n} components selected")
+                else:
+                    desc = pc.label or pc.id
+                    self._update_status(f"Selected {desc} ({pc.comp_def.name})")
             else:
                 # Check for division line near click
                 er, ec = self.renderer.canvas_to_edge(event.x, event.y)
@@ -874,15 +1485,17 @@ class BreadboardApp:
                     self._drag_div_idx = didx
                     self._drag_div_orig = (dl.r1, dl.c1, dl.r2, dl.c2)
                     self.renderer.selected_division = didx
-                    self.selected_comp_id = None
-                    self.renderer.selected_id = None
+                    self._clear_selection()
+                    self._deselect_text_label()
                     self._drag_comp_id = None
                     self._update_status(f"Selected division {didx} (drag to move)")
                 else:
-                    self.selected_comp_id = None
-                    self.renderer.selected_id = None
+                    # Start rubber-band selection
+                    self._clear_selection()
+                    self._deselect_text_label()
                     self.renderer.selected_division = -1
                     self._drag_div_idx = -1
+                    self._rubberband_start = (event.x, event.y)
                     self._update_status()
             self.renderer.redraw()
 
@@ -893,6 +1506,29 @@ class BreadboardApp:
 
     def _on_drag(self, event):
         if self.mode != MODE_SELECT:
+            return
+        # Text label drag
+        if self._drag_text_label_id:
+            if not self._drag_text_label_started:
+                sx, sy = self._drag_start
+                if (event.x - sx) ** 2 + (event.y - sy) ** 2 < 25:
+                    return
+                self._drag_text_label_started = True
+            tl = self.board.get_text_label(self._drag_text_label_id)
+            if tl:
+                rf, cf = self.renderer.canvas_to_grid_float(event.x, event.y)
+                cr, cc = self._drag_text_label_click
+                orig_r, orig_c = self._drag_text_label_orig
+                tl.row = orig_r + (rf - cr)
+                tl.col = orig_c + (cf - cc)
+                self.renderer.redraw()
+            return
+        # Rubber-band update
+        if self._rubberband_start:
+            x0, y0 = self._rubberband_start
+            self.renderer.selection_rect = (min(x0, event.x), min(y0, event.y),
+                                            max(x0, event.x), max(y0, event.y))
+            self.renderer.redraw()
             return
         # Drag division line
         if self._drag_div_idx >= 0:
@@ -911,22 +1547,88 @@ class BreadboardApp:
                 dl.c2 = ec
             self.renderer.redraw()
             return
-        # Drag component
+        # Multi-drag: move all selected components visually (cursor = group centroid)
+        if self._drag_comp_id and self._drag_orig_positions:
+            self._pending_single_select = None  # drag started, cancel deferred selection
+            # 5-pixel dead zone before committing to a drag
+            if not self._drag_started_moving:
+                sx, sy = self._drag_start
+                if (event.x - sx) ** 2 + (event.y - sy) ** 2 < 25:
+                    return
+                self._drag_started_moving = True
+            row, col = self.renderer.canvas_to_grid(event.x, event.y)
+            row, col = self._clamp_to_board(row, col)
+            # Delta: cursor represents the group centroid / anchor-component center
+            dr = round(row - self._drag_orig_center_row)
+            dc = round(col - self._drag_orig_center_col)
+            for cid, (orig_r, orig_c) in self._drag_orig_positions.items():
+                pc = self.board.components.get(cid)
+                if pc:
+                    nr, nc = self._clamp_to_board(orig_r + dr, orig_c + dc)
+                    pc.anchor_row = nr
+                    pc.anchor_col = nc
+            self.renderer.redraw()
+            return
+        # Single component drag (fallback — no _drag_orig_positions)
         if self._drag_comp_id is None:
             return
+        if not self._drag_started_moving:
+            sx, sy = self._drag_start
+            if (event.x - sx) ** 2 + (event.y - sy) ** 2 < 25:
+                return
+            self._drag_started_moving = True
         row, col = self.renderer.canvas_to_grid(event.x, event.y)
         row, col = self._clamp_to_board(row, col)
         pc = self.board.components.get(self._drag_comp_id)
         if not pc:
             return
-        if pc.anchor_row != row or pc.anchor_col != col:
-            # Visual-only move during drag: just update anchor, don't touch pad grid
-            pc.anchor_row = row
-            pc.anchor_col = col
+        # Cursor represents visual center
+        new_ar, new_ac = self._center_rot_anchor(pc.comp_def, row, col, pc.rotation)
+        new_ar, new_ac = self._clamp_to_board(new_ar, new_ac)
+        if pc.anchor_row != new_ar or pc.anchor_col != new_ac:
+            pc.anchor_row = new_ar
+            pc.anchor_col = new_ac
             self.renderer.redraw()
 
     def _on_release(self, event):
         if self.mode != MODE_SELECT:
+            return
+        # Finalize text label drag
+        if self._drag_text_label_id:
+            tl = self.board.get_text_label(self._drag_text_label_id)
+            if tl and self._drag_text_label_started:
+                orig_r, orig_c = self._drag_text_label_orig
+                if tl.row != orig_r or tl.col != orig_c:
+                    new_r, new_c = tl.row, tl.col
+                    tl.row, tl.col = orig_r, orig_c   # restore for command
+                    cmd = MoveTextLabelCmd(self, self._drag_text_label_id,
+                                          orig_r, orig_c, new_r, new_c)
+                    self._execute_cmd(cmd)
+            self._drag_text_label_id = None
+            self._drag_text_label_orig = None
+            self._drag_text_label_click = None
+            self._drag_text_label_started = False
+            self.renderer.redraw()
+            return
+        # Finalize rubber-band selection
+        if self._rubberband_start:
+            x0, y0 = self._rubberband_start
+            x1, y1 = event.x, event.y
+            self.renderer.selection_rect = None
+            self._rubberband_start = None
+            r0f, c0f = self.renderer.canvas_to_grid_float(min(x0, x1), min(y0, y1))
+            r1f, c1f = self.renderer.canvas_to_grid_float(max(x0, x1), max(y0, y1))
+            selected = set()
+            for cid, pc in self.board.components.items():
+                for cr, cc in pc.get_all_cells():
+                    if r0f - 0.5 <= cr <= r1f + 0.5 and c0f - 0.5 <= cc <= c1f + 0.5:
+                        selected.add(cid)
+                        break
+            self._set_selection(selected)
+            if selected:
+                n = len(selected)
+                self._update_status(f"{n} component(s) selected")
+            self.renderer.redraw()
             return
         # Finalize division drag
         if self._drag_div_idx >= 0 and self._drag_div_orig is not None:
@@ -943,7 +1645,61 @@ class BreadboardApp:
             self._drag_div_idx = -1
             self._drag_div_orig = None
             return
-        # Finalize component drag
+        # Finalize multi-component drag
+        if self._drag_comp_id and self._drag_orig_positions:
+            anchor_pc = self.board.components.get(self._drag_comp_id)
+            if anchor_pc:
+                dr = anchor_pc.anchor_row - self._drag_orig_row
+                dc = anchor_pc.anchor_col - self._drag_orig_col
+                if dr != 0 or dc != 0:
+                    # Restore visual positions to originals first
+                    for cid, (orig_r, orig_c) in self._drag_orig_positions.items():
+                        pc = self.board.components.get(cid)
+                        if pc:
+                            pc.anchor_row, pc.anchor_col = orig_r, orig_c
+                    # Build move entries
+                    entries = []
+                    for cid, (orig_r, orig_c) in self._drag_orig_positions.items():
+                        pc = self.board.components.get(cid)
+                        if pc:
+                            new_r, new_c = self._clamp_to_board(orig_r + dr, orig_c + dc)
+                            entries.append((cid, pc.comp_def, pc.label, pc.rotation,
+                                            orig_r, orig_c, new_r, new_c))
+                    # Validate: temporarily remove all, check each, restore
+                    for cid, *_ in entries:
+                        self.board.remove_component(cid)
+                    all_valid = all(
+                        self.board.can_place(comp_def, new_r, new_c, rot)
+                        for _, comp_def, _, rot, _, _, new_r, new_c in entries
+                    )
+                    for cid, comp_def, label, rot, old_r, old_c, _, _ in entries:
+                        placed = self.board.place_component(comp_def, old_r, old_c, rot, comp_id=cid)
+                        if placed and label is not None:
+                            placed.label = label
+                    if all_valid:
+                        cmd = MultiMoveCmd(self, entries)
+                        self._execute_cmd(cmd)
+                        self._update_status(f"Moved {len(entries)} component(s)")
+                    else:
+                        self._update_status("Cannot move — collision or out of bounds")
+            # If no actual drag occurred and selection was deferred, collapse to single
+            if self._pending_single_select:
+                self._set_selection({self._pending_single_select})
+                cid = self._pending_single_select
+                pc2 = self.board.components.get(cid)
+                if pc2:
+                    desc = pc2.label or cid
+                    self._update_status(f"Selected {desc} ({pc2.comp_def.name})")
+            self._pending_single_select = None
+            self._drag_comp_id = None
+            self._drag_start = None
+            self._drag_orig_positions = {}
+            self._drag_orig_center_row = None
+            self._drag_orig_center_col = None
+            self._drag_started_moving = False
+            self.renderer.redraw()
+            return
+        # Finalize single component drag
         if self._drag_comp_id is None:
             return
         pc = self.board.components.get(self._drag_comp_id)
@@ -960,15 +1716,37 @@ class BreadboardApp:
             else:
                 self._update_status("Invalid position - returned to original")
             self.renderer.redraw()
+        self._pending_single_select = None
         self._drag_comp_id = None
         self._drag_start = None
+        self._drag_orig_center_row = None
+        self._drag_orig_center_col = None
+        self._drag_started_moving = False
 
     def _on_mouse_move(self, event):
+        if self._ghost_text_label_props is not None:
+            row_f, col_f = self.renderer.canvas_to_grid_float(event.x, event.y)
+            self.renderer.text_label_ghost_pos = (row_f, col_f)
+            self.renderer.redraw()
+            return
         row, col = self.renderer.canvas_to_grid(event.x, event.y)
-        if self.mode == MODE_PLACE and self.place_comp_def:
+        if self._multi_ghost_entries and self.mode == MODE_PLACE:
             row_c, col_c = self._clamp_to_board(row, col)
-            valid = self.board.can_place(self.place_comp_def, row_c, col_c, self.place_rotation)
-            self.renderer.ghost = (self.place_comp_def, row_c, col_c, self.place_rotation, valid)
+            dr = row_c - self._multi_ghost_ref_row
+            dc = col_c - self._multi_ghost_ref_col
+            new_multi_ghost = []
+            for e in self._multi_ghost_entries:
+                gr, gc = e['base_row'] + dr, e['base_col'] + dc
+                valid = self.board.can_place(e['comp_def'], gr, gc, e['new_rot'])
+                new_multi_ghost.append((e['comp_def'], gr, gc, e['new_rot'], valid))
+            self.renderer.multi_ghost = new_multi_ghost
+            self.renderer.redraw()
+        elif self.mode == MODE_PLACE and self.place_comp_def:
+            row_c, col_c = self._clamp_to_board(row, col)
+            # Cursor tracks visual center: compute anchor to center component on cursor
+            new_ar, new_ac = self._center_rot_anchor(self.place_comp_def, row_c, col_c, self.place_rotation)
+            valid = self.board.can_place(self.place_comp_def, new_ar, new_ac, self.place_rotation)
+            self.renderer.ghost = (self.place_comp_def, new_ar, new_ac, self.place_rotation, valid)
             self.renderer.redraw()
         elif self.mode == MODE_WIRE and self._wire_start:
             row_c, col_c = self._clamp_to_board(row, col)
@@ -1009,30 +1787,198 @@ class BreadboardApp:
         else:
             self.renderer.zoom_out(event.x, event.y)
 
+    # ── Free text label helpers ──
+
+    def _get_text_label_at(self, cx, cy, layer=None):
+        """Return the TextLabel whose canvas bbox contains (cx,cy), or None.
+        layer=None checks all layers; layer='above'/'below' filters by tl.layer."""
+        for tl_id, (bx0, by0, bx1, by1) in self.renderer._text_label_bboxes.items():
+            if bx0 <= cx <= bx1 and by0 <= cy <= by1:
+                tl = self.board.get_text_label(tl_id)
+                if tl and (layer is None or tl.layer == layer):
+                    return tl
+        return None
+
+    def _select_text_label(self, tl_id):
+        self._clear_selection()
+        self.renderer.selected_division = -1
+        self._selected_text_label_id = tl_id
+        self.renderer.selected_text_label_id = tl_id
+
+    def _deselect_text_label(self):
+        self._selected_text_label_id = None
+        self.renderer.selected_text_label_id = None
+
+    def _add_text_label(self, cx=None, cy=None):
+        """Open dialog, then enter ghost mode so the user can position the new label."""
+        dlg = TextLabelDialog(self.root, title='Add Text Label')
+        if dlg.result and dlg.result['text'].strip():
+            if cx is None:
+                cx = self.canvas.winfo_width() / 2
+                cy = self.canvas.winfo_height() / 2
+            row_f, col_f = self.renderer.canvas_to_grid_float(cx, cy)
+            self._ghost_text_label_props = dlg.result
+            self.renderer.text_label_ghost = dlg.result
+            self.renderer.text_label_ghost_pos = (row_f, col_f)
+            self._update_status("Click to place text label  (Esc to cancel)")
+            self.renderer.redraw()
+
+    def _edit_text_label(self, tl):
+        """Open edit dialog for an existing TextLabel."""
+        initial = {
+            'text': tl.text, 'size': tl.size, 'align': tl.align,
+            'opacity': tl.opacity, 'layer': tl.layer, 'color': tl.color,
+            'bg_color': tl.bg_color, 'border_color': tl.border_color,
+        }
+        dlg = TextLabelDialog(self.root, title=f'Edit Text Label {tl.id}', initial=initial)
+        if dlg.result is not None:
+            old_props = initial.copy()
+            new_props = dlg.result
+            cmd = EditTextLabelCmd(self, tl.id, old_props, new_props)
+            self._execute_cmd(cmd)
+            self.renderer.redraw()
+
+    # ── Rotation geometry helpers ──
+
+    def _component_center(self, pc):
+        """Return (center_r, center_c) world coords of the component's visual center."""
+        all_cells = list(pc.get_all_cells())
+        if not all_cells:
+            return float(pc.anchor_row), float(pc.anchor_col)
+        return (sum(r for r, c in all_cells) / len(all_cells),
+                sum(c for r, c in all_cells) / len(all_cells))
+
+    def _center_rot_anchor(self, comp_def, center_r, center_c, new_rot):
+        """Compute the anchor that places comp_def's visual center at (center_r, center_c)
+        when drawn with rotation new_rot."""
+        cells = comp_def.get_rotated_pins(new_rot) + comp_def.get_rotated_body(new_rot)
+        if not cells:
+            return round(center_r), round(center_c)
+        mean_dr = sum(r for r, c in cells) / len(cells)
+        mean_dc = sum(c for r, c in cells) / len(cells)
+        return round(center_r - mean_dr), round(center_c - mean_dc)
+
     # ── Rotate ──
 
     def _rotate(self):
-        if self.mode == MODE_PLACE:
-            self.place_rotation = (self.place_rotation + 90) % 360
-            # Update ghost immediately with new rotation
+        if self._selected_text_label_id:
+            tl = self.board.get_text_label(self._selected_text_label_id)
+            if tl:
+                new_rot = (tl.rotation + 90) % 360
+                cmd = RotateTextLabelCmd(self, tl.id, tl.rotation, new_rot)
+                self._execute_cmd(cmd)
+                self._update_status(f"Rotated text label {tl.id} to {new_rot}°")
+                self.renderer.redraw()
+            return
+        if self.mode == MODE_PLACE and self._multi_ghost_entries:
+            # Rotate all ghost components another 90° around group centroid
+            cr = self._multi_ghost_ref_row
+            cc = self._multi_ghost_ref_col
+            for e in self._multi_ghost_entries:
+                dr = e['base_row'] - cr
+                dc = e['base_col'] - cc
+                e['base_row'] = round(cr + dc)
+                e['base_col'] = round(cc - dr)
+                e['new_rot'] = (e['new_rot'] + 90) % 360
+            self.renderer.multi_ghost = [
+                (e['comp_def'], e['base_row'], e['base_col'], e['new_rot'],
+                 self.board.can_place(e['comp_def'], e['base_row'], e['base_col'], e['new_rot']))
+                for e in self._multi_ghost_entries
+            ]
+            self.renderer.redraw()
+        elif self.mode == MODE_PLACE:
             if self.renderer.ghost:
-                comp_def, row, col, _, _ = self.renderer.ghost
-                valid = self.board.can_place(comp_def, row, col, self.place_rotation)
-                self.renderer.ghost = (comp_def, row, col, self.place_rotation, valid)
+                comp_def, row, col, old_rot, _ = self.renderer.ghost
+                new_rot = (old_rot + 90) % 360
+                # Keep visual center fixed: compute center at old anchor/rotation
+                old_cells = comp_def.get_rotated_pins(old_rot) + comp_def.get_rotated_body(old_rot)
+                if old_cells:
+                    ctr_r = row + sum(r for r, c in old_cells) / len(old_cells)
+                    ctr_c = col + sum(c for r, c in old_cells) / len(old_cells)
+                else:
+                    ctr_r, ctr_c = float(row), float(col)
+                new_ar, new_ac = self._center_rot_anchor(comp_def, ctr_r, ctr_c, new_rot)
+                valid = self.board.can_place(comp_def, new_ar, new_ac, new_rot)
+                self.renderer.ghost = (comp_def, new_ar, new_ac, new_rot, valid)
+            self.place_rotation = (self.place_rotation + 90) % 360
             self._update_status(f"Rotation: {self.place_rotation}")
             self.renderer.redraw()
-        elif self.mode == MODE_SELECT and self.selected_comp_id:
-            cmd = RotateCmd(self, self.selected_comp_id)
-            if self._execute_cmd(cmd):
-                self._update_status(f"Rotated {self.selected_comp_id}")
+        elif self.mode == MODE_SELECT and self.selected_comp_ids:
+            if len(self.selected_comp_ids) == 1:
+                cid = next(iter(self.selected_comp_ids))
+                pc = self.board.components.get(cid)
+                if not pc:
+                    return
+                new_rot = (pc.rotation + 90) % 360
+                # Compute anchor that preserves the component's visual center
+                ctr_r, ctr_c = self._component_center(pc)
+                new_ar, new_ac = self._center_rot_anchor(pc.comp_def, ctr_r, ctr_c, new_rot)
+                if self.board.can_place(pc.comp_def, new_ar, new_ac, new_rot, exclude_id=cid):
+                    entry = (cid, pc.comp_def, pc.label,
+                             pc.anchor_row, pc.anchor_col, pc.rotation,
+                             new_ar, new_ac, new_rot)
+                    self._execute_cmd(MultiRotateCmd(self, [entry]))
+                    self._update_status(f"Rotated {cid}")
+                else:
+                    self._lift_for_rotation(cid, ghost_row=new_ar, ghost_col=new_ac)
             else:
-                # No room to rotate in place — lift and enter floating mode
-                self._lift_for_rotation(self.selected_comp_id)
+                # Multi-rotate: rotate each component's visual center around group centroid
+                comp_ids = list(self.selected_comp_ids)
+                valid_pcs = [(cid, self.board.components[cid])
+                             for cid in comp_ids if cid in self.board.components]
+                if not valid_pcs:
+                    return
+                # Compute visual center of each component and group centroid
+                comp_centers = {cid: self._component_center(pc) for cid, pc in valid_pcs}
+                all_cr = [r for r, c in comp_centers.values()]
+                all_cc = [c for r, c in comp_centers.values()]
+                gr_cr = sum(all_cr) / len(all_cr)
+                gr_cc = sum(all_cc) / len(all_cc)
+                # Temporarily remove all to check placement
+                saved = {}
+                for cid, pc in valid_pcs:
+                    saved[cid] = (pc.comp_def, pc.label, pc.anchor_row, pc.anchor_col, pc.rotation)
+                    self.board.remove_component(cid)
+                # Compute new position for each: rotate its visual center around group centroid
+                new_states = {}
+                for cid, pc in valid_pcs:
+                    comp_def, label, old_r, old_c, old_rot = saved[cid]
+                    dr = comp_centers[cid][0] - gr_cr
+                    dc = comp_centers[cid][1] - gr_cc
+                    new_ctr_r = gr_cr + dc   # 90° CW: (dr,dc) → (dc,-dr)
+                    new_ctr_c = gr_cc - dr
+                    new_rot = (old_rot + 90) % 360
+                    new_ar, new_ac = self._center_rot_anchor(comp_def, new_ctr_r, new_ctr_c, new_rot)
+                    new_states[cid] = (new_ar, new_ac, new_rot)
+                can_all_fit = all(
+                    self.board.can_place(saved[cid][0], ns[0], ns[1], ns[2])
+                    for cid, ns in new_states.items()
+                )
+                # Restore all to original positions
+                for cid, (comp_def, label, old_r, old_c, old_rot) in saved.items():
+                    placed = self.board.place_component(comp_def, old_r, old_c, old_rot, comp_id=cid)
+                    if placed and label is not None:
+                        placed.label = label
+                if can_all_fit:
+                    rot_entries = [
+                        (cid, saved[cid][0], saved[cid][1],
+                         saved[cid][2], saved[cid][3], saved[cid][4],
+                         new_states[cid][0], new_states[cid][1], new_states[cid][2])
+                        for cid in comp_ids if cid in new_states
+                    ]
+                    self._execute_cmd(MultiRotateCmd(self, rot_entries))
+                    self._update_status(f"Rotated {len(comp_ids)} component(s)")
+                else:
+                    self._enter_multi_ghost(comp_ids, new_positions=new_states)
             self.renderer.redraw()
 
-    def _lift_for_rotation(self, comp_id):
+    def _lift_for_rotation(self, comp_id, ghost_row=None, ghost_col=None):
         """Remove component from board and enter floating place mode so the user
-        can choose where to drop it at its new rotation."""
+        can choose where to drop it at its new rotation.
+
+        ghost_row/col: initial ghost position (defaults to center-preserving position,
+        then falls back to original anchor).
+        """
         pc = self.board.components.get(comp_id)
         if not pc:
             return
@@ -1048,10 +1994,12 @@ class BreadboardApp:
         self._paste_label = None
         self.mode = MODE_PLACE
         self._mode_var.set(MODE_PLACE)
-        # Show ghost immediately at the original position with the new rotation
+        # Show ghost at the specified position (center-preserving if provided)
         new_rot = self.place_rotation
-        valid = self.board.can_place(pc.comp_def, self._lifted_orig_row, self._lifted_orig_col, new_rot)
-        self.renderer.ghost = (pc.comp_def, self._lifted_orig_row, self._lifted_orig_col, new_rot, valid)
+        gr = ghost_row if ghost_row is not None else self._lifted_orig_row
+        gc = ghost_col if ghost_col is not None else self._lifted_orig_col
+        valid = self.board.can_place(pc.comp_def, gr, gc, new_rot)
+        self.renderer.ghost = (pc.comp_def, gr, gc, new_rot, valid)
         self._update_status(f"Rotate {self._lifted_comp_id}: choose position (Esc to cancel)")
 
     def _clear_lifted(self):
@@ -1074,6 +2022,96 @@ class BreadboardApp:
         if placed and self._lifted_comp_label is not None:
             placed.label = self._lifted_comp_label
         self._clear_lifted()
+
+    # ── Selection helpers ──
+
+    def _set_selection(self, comp_ids):
+        """Set the selection to exactly the given set of component IDs."""
+        self.selected_comp_ids = set(comp_ids)
+        self.renderer.selected_ids = set(comp_ids)
+
+    def _clear_selection(self):
+        """Clear the current selection."""
+        self.selected_comp_ids = set()
+        self.renderer.selected_ids = set()
+
+    def _select_all(self):
+        """Select all components on the board (Ctrl+A)."""
+        if self.mode == MODE_SELECT:
+            self._set_selection(set(self.board.components.keys()))
+            n = len(self.selected_comp_ids)
+            if n:
+                self._update_status(f"{n} components selected")
+            self.renderer.redraw()
+
+    # ── Multi-ghost helpers ──
+
+    def _enter_multi_ghost(self, comp_ids, new_rot_delta=90, new_positions=None):
+        """Remove all listed components and enter multi-ghost floating mode.
+
+        new_positions: optional {comp_id: (new_r, new_c, new_rot)} for pre-computed
+                       center-preserving positions. If None, uses original anchors.
+        """
+        entries = []
+        for cid in comp_ids:
+            pc = self.board.components.get(cid)
+            if pc:
+                if new_positions and cid in new_positions:
+                    base_r, base_c, new_rot = new_positions[cid]
+                else:
+                    base_r, base_c = pc.anchor_row, pc.anchor_col
+                    new_rot = (pc.rotation + new_rot_delta) % 360
+                entries.append({
+                    'comp_id': cid,
+                    'comp_def': pc.comp_def,
+                    'label': pc.label,
+                    'old_row': pc.anchor_row,
+                    'old_col': pc.anchor_col,
+                    'old_rot': pc.rotation,
+                    'new_rot': new_rot,
+                    'base_row': base_r,
+                    'base_col': base_c,
+                })
+                self.board.remove_component(cid)
+        if not entries:
+            return
+        self._multi_ghost_entries = entries
+        # Compute group centroid as reference point
+        self._multi_ghost_ref_row = sum(e['base_row'] for e in entries) / len(entries)
+        self._multi_ghost_ref_col = sum(e['base_col'] for e in entries) / len(entries)
+        # Round to nearest grid position for cursor tracking
+        self._multi_ghost_ref_row = round(self._multi_ghost_ref_row)
+        self._multi_ghost_ref_col = round(self._multi_ghost_ref_col)
+        # Show initial ghost at base positions (delta=0)
+        self.renderer.multi_ghost = [
+            (e['comp_def'], e['base_row'], e['base_col'], e['new_rot'],
+             self.board.can_place(e['comp_def'], e['base_row'], e['base_col'], e['new_rot']))
+            for e in entries
+        ]
+        self.place_comp_def = None
+        self.mode = MODE_PLACE
+        self._mode_var.set(MODE_PLACE)
+        self._update_status(
+            f"Rotate group: choose position (R to rotate more, Esc to cancel)"
+        )
+
+    def _clear_multi_ghost(self):
+        """Clear multi-ghost state without restoring components."""
+        self._multi_ghost_entries = []
+        self._multi_ghost_ref_row = None
+        self._multi_ghost_ref_col = None
+        self.renderer.multi_ghost = None
+
+    def _restore_multi_ghost(self):
+        """Restore all multi-ghost components to their original positions and clear state."""
+        for e in self._multi_ghost_entries:
+            placed = self.board.place_component(
+                e['comp_def'], e['old_row'], e['old_col'], e['old_rot'],
+                comp_id=e['comp_id']
+            )
+            if placed and e['label'] is not None:
+                placed.label = e['label']
+        self._clear_multi_ghost()
 
     # ── Undo/Redo ──
 
@@ -1111,16 +2149,28 @@ class BreadboardApp:
     # ── Delete ──
 
     def _delete_selected(self):
-        if self.selected_comp_id:
-            cmd = DeleteCmd(self, self.selected_comp_id)
+        if self._selected_text_label_id:
+            cmd = DeleteTextLabelCmd(self, self._selected_text_label_id)
             if self._execute_cmd(cmd):
-                self._update_status(f"Deleted {self.selected_comp_id}")
-                self.selected_comp_id = None
-                self.renderer.selected_id = None
+                self._deselect_text_label()
+                self._update_status("Deleted text label")
                 self.renderer.redraw()
+            return
+        if not self.selected_comp_ids:
+            return
+        n = len(self.selected_comp_ids)
+        if n == 1:
+            cid = next(iter(self.selected_comp_ids))
+            cmd = DeleteCmd(self, cid)
+        else:
+            cmd = MultiDeleteCmd(self, self.selected_comp_ids)
+        if self._execute_cmd(cmd):
+            self._clear_selection()
+            self._update_status(f"Deleted {n} component(s)")
+            self.renderer.redraw()
 
     def _move_selected(self, dr, dc):
-        """Move selected component or division by (dr, dc) using arrow keys."""
+        """Move selected component(s) or division by (dr, dc) using arrow keys."""
         if self.mode != MODE_SELECT:
             return
         # Move division line
@@ -1140,26 +2190,57 @@ class BreadboardApp:
             self._execute_cmd(cmd)
             self.renderer.redraw()
             return
-        # Move component
-        if not self.selected_comp_id:
+        # Move selected components
+        if not self.selected_comp_ids:
             return
-        pc = self.board.components.get(self.selected_comp_id)
-        if not pc:
-            return
-        new_row = pc.anchor_row + dr
-        new_col = pc.anchor_col + dc
-        if self.board.can_place(pc.comp_def, new_row, new_col, pc.rotation, exclude_id=pc.id):
-            cmd = MoveCmd(self, pc.id, pc.anchor_row, pc.anchor_col, new_row, new_col)
-            self._execute_cmd(cmd)
-            self.renderer.redraw()
+        if len(self.selected_comp_ids) == 1:
+            cid = next(iter(self.selected_comp_ids))
+            pc = self.board.components.get(cid)
+            if not pc:
+                return
+            new_row = pc.anchor_row + dr
+            new_col = pc.anchor_col + dc
+            if self.board.can_place(pc.comp_def, new_row, new_col, pc.rotation, exclude_id=pc.id):
+                cmd = MoveCmd(self, pc.id, pc.anchor_row, pc.anchor_col, new_row, new_col)
+                self._execute_cmd(cmd)
+                self.renderer.redraw()
+        else:
+            # Multi-move: build entries and validate
+            comp_ids = list(self.selected_comp_ids)
+            entries = []
+            for cid in comp_ids:
+                pc = self.board.components.get(cid)
+                if pc:
+                    new_r = pc.anchor_row + dr
+                    new_c = pc.anchor_col + dc
+                    entries.append((cid, pc.comp_def, pc.label, pc.rotation,
+                                    pc.anchor_row, pc.anchor_col, new_r, new_c))
+            if not entries:
+                return
+            # Validate: temporarily remove all, check each, restore
+            for cid, *_ in entries:
+                self.board.remove_component(cid)
+            all_valid = all(
+                self.board.can_place(comp_def, new_r, new_c, rot)
+                for _, comp_def, _, rot, _, _, new_r, new_c in entries
+            )
+            for cid, comp_def, label, rot, old_r, old_c, _, _ in entries:
+                placed = self.board.place_component(comp_def, old_r, old_c, rot, comp_id=cid)
+                if placed and label is not None:
+                    placed.label = label
+            if all_valid:
+                cmd = MultiMoveCmd(self, entries)
+                self._execute_cmd(cmd)
+                self.renderer.redraw()
 
     # ── Clipboard (Cut/Copy/Paste) ──
 
     def _copy_selected(self):
-        """Copy selected component to system clipboard."""
-        if not self.selected_comp_id:
+        """Copy selected component to system clipboard (single selection only)."""
+        if len(self.selected_comp_ids) != 1:
             return
-        pc = self.board.components.get(self.selected_comp_id)
+        cid = next(iter(self.selected_comp_ids))
+        pc = self.board.components.get(cid)
         if not pc:
             return
         data = pc.to_dict()
@@ -1170,10 +2251,11 @@ class BreadboardApp:
         self._update_status(f"Copied {pc.id} ({label})")
 
     def _cut_selected(self):
-        """Cut selected component: copy to clipboard + delete."""
-        if not self.selected_comp_id:
+        """Cut selected component: copy to clipboard + delete (single selection only)."""
+        if len(self.selected_comp_ids) != 1:
             return
-        pc = self.board.components.get(self.selected_comp_id)
+        cid = next(iter(self.selected_comp_ids))
+        pc = self.board.components.get(cid)
         if not pc:
             return
         # Copy to clipboard first
@@ -1183,10 +2265,9 @@ class BreadboardApp:
         self.root.clipboard_append(clip_text)
         label = pc.label or pc.id
         # Delete via command (supports undo)
-        cmd = DeleteCmd(self, self.selected_comp_id)
+        cmd = DeleteCmd(self, cid)
         self._execute_cmd(cmd)
-        self.selected_comp_id = None
-        self.renderer.selected_id = None
+        self._clear_selection()
         self.renderer.redraw()
         self._update_status(f"Cut {pc.id} ({label})")
 
@@ -1304,9 +2385,9 @@ class BreadboardApp:
             self.modified = False
             self._undo_stack.clear()
             self._redo_stack.clear()
-            self.selected_comp_id = None
-            self.renderer.selected_id = None
+            self._clear_selection()
             self.renderer.ghost = None
+            self.renderer.multi_ghost = None
             self._update_title()
             self.renderer.zoom_fit()
             dialog.destroy()
@@ -1439,9 +2520,9 @@ class BreadboardApp:
             self.modified = False
             self._undo_stack.clear()
             self._redo_stack.clear()
-            self.selected_comp_id = None
-            self.renderer.selected_id = None
+            self._clear_selection()
             self.renderer.ghost = None
+            self.renderer.multi_ghost = None
             self._acquire_lock()
             self._save_recent(filepath)
             self._update_title()
@@ -1574,9 +2655,9 @@ class BreadboardApp:
 
     def _rotate_board(self):
         self.board.rotate_board_cw()
-        self.selected_comp_id = None
-        self.renderer.selected_id = None
+        self._clear_selection()
         self.renderer.ghost = None
+        self.renderer.multi_ghost = None
         self.modified = True
         self._update_title()
         self.renderer.zoom_fit()
@@ -1603,8 +2684,7 @@ class BreadboardApp:
         self.board.clear()
         self._undo_stack.clear()
         self._redo_stack.clear()
-        self.selected_comp_id = None
-        self.renderer.selected_id = None
+        self._clear_selection()
         self.modified = True
         self._update_title()
         self.renderer.redraw()

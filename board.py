@@ -19,6 +19,57 @@ def _point_to_segment_dist(pr, pc, r1, c1, r2, c2):
     return math.hypot(pr - proj_r, pc - proj_c)
 
 
+class TextLabel:
+    """A free-floating text annotation on the board (no collision)."""
+
+    def __init__(self, label_id, row, col, text=''):
+        self.id = label_id
+        self.row = float(row)
+        self.col = float(col)
+        self.text = text
+        self.size = None          # font size override (int), None = auto
+        self.align = 'center'     # 'left', 'center', 'right'
+        self.opacity = 100        # background opacity 0-100
+        self.layer = 'above'      # 'above' or 'below' components
+        self.color = '#E0E0E0'    # text color
+        self.rotation = 0         # 0, 90, 180, 270 degrees (CW)
+        self.bg_color = '#000000' # background fill color
+        self.border_color = ''    # border color, '' = no border
+
+    def to_dict(self):
+        d = {'id': self.id, 'row': self.row, 'col': self.col, 'text': self.text}
+        if self.size is not None:
+            d['size'] = self.size
+        if self.align != 'center':
+            d['align'] = self.align
+        if self.opacity != 100:
+            d['opacity'] = self.opacity
+        if self.layer != 'above':
+            d['layer'] = self.layer
+        if self.color != '#E0E0E0':
+            d['color'] = self.color
+        if self.rotation != 0:
+            d['rotation'] = self.rotation
+        if self.bg_color != '#000000':
+            d['bg_color'] = self.bg_color
+        if self.border_color:
+            d['border_color'] = self.border_color
+        return d
+
+    @classmethod
+    def from_dict(cls, data):
+        tl = cls(data['id'], data['row'], data['col'], data.get('text', ''))
+        tl.size = data.get('size')
+        tl.align = data.get('align', 'center')
+        tl.opacity = data.get('opacity', 100)
+        tl.layer = data.get('layer', 'above')
+        tl.color = data.get('color', '#E0E0E0')
+        tl.rotation = data.get('rotation', 0)
+        tl.bg_color = data.get('bg_color', '#000000')
+        tl.border_color = data.get('border_color', '')
+        return tl
+
+
 class Pad:
     """Single pad on the perfboard."""
     __slots__ = ('row', 'col', 'occupied_by')
@@ -39,6 +90,8 @@ class PlacedComponent:
         self.anchor_col = anchor_col
         self.rotation = rotation    # 0, 90, 180, 270
         self.label = None           # custom display name (e.g. "Z80"), None = show id
+        self.label_size = None      # font size override (int), None = auto
+        self.label_align = 'center' # text alignment: 'left', 'center', 'right'
 
     def get_occupied_cells(self):
         """Return list of (row, col) that block placement (pins only).
@@ -75,6 +128,10 @@ class PlacedComponent:
         }
         if self.label:
             d['label'] = self.label
+        if self.label_size is not None:
+            d['label_size'] = self.label_size
+        if self.label_align != 'center':
+            d['label_align'] = self.label_align
         return d
 
 
@@ -131,7 +188,9 @@ class Board:
         self.components = {}  # id -> PlacedComponent
         self.guides = []      # list of GuideLine
         self.divisions = []   # list of DivisionLine
+        self.text_labels = [] # list of TextLabel
         self._next_counters = {}  # type_prefix -> next number
+        self._next_text_label_num = 1
 
     def _in_bounds(self, row, col):
         return 0 <= row < self.rows and 0 <= col < self.cols
@@ -359,14 +418,32 @@ class Board:
         return best_idx
 
     def clear(self):
-        """Remove all components, guides and divisions."""
+        """Remove all components, guides, divisions and text labels."""
         for r in range(self.rows):
             for c in range(self.cols):
                 self.pads[r][c].occupied_by = None
         self.components.clear()
         self.guides.clear()
         self.divisions.clear()
+        self.text_labels.clear()
         self._next_counters.clear()
+        self._next_text_label_num = 1
+
+    def add_text_label(self, row, col, text=''):
+        tl_id = f'T{self._next_text_label_num}'
+        self._next_text_label_num += 1
+        tl = TextLabel(tl_id, row, col, text)
+        self.text_labels.append(tl)
+        return tl
+
+    def remove_text_label(self, label_id):
+        self.text_labels = [tl for tl in self.text_labels if tl.id != label_id]
+
+    def get_text_label(self, label_id):
+        for tl in self.text_labels:
+            if tl.id == label_id:
+                return tl
+        return None
 
     def resize(self, new_rows, new_cols):
         """Resize board. Removes components that would be out of bounds."""
@@ -399,7 +476,7 @@ class Board:
             comp_data.append((
                 pc.id, pc.comp_def,
                 pc.anchor_row, pc.anchor_col, pc.rotation,
-                pc.label,
+                pc.label, pc.label_size, pc.label_align,
             ))
         # Save guide and division state
         guide_data = [(gl.r1, gl.c1, gl.r2, gl.c2, gl.color) for gl in self.guides]
@@ -413,13 +490,17 @@ class Board:
         self.pads = [[Pad(r, c) for c in range(new_cols)] for r in range(new_rows)]
 
         # Re-place with transformed coordinates
-        for comp_id, comp_def, ar, ac, rot, label in comp_data:
+        for comp_id, comp_def, ar, ac, rot, label, label_size, label_align in comp_data:
             new_ar = ac
             new_ac = (old_rows - 1) - ar
             new_rot = (rot + 90) % 360
             placed = self.place_component(comp_def, new_ar, new_ac, new_rot, comp_id=comp_id)
-            if placed and label is not None:
-                placed.label = label
+            if placed:
+                if label is not None:
+                    placed.label = label
+                if label_size is not None:
+                    placed.label_size = label_size
+                placed.label_align = label_align
 
         # Re-add guides with transformed coordinates
         for r1, c1, r2, c2, color in guide_data:

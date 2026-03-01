@@ -43,9 +43,15 @@ class BoardRenderer:
         self.guide_preview = None     # (r1, c1, r2, c2) while drawing a guide
         self.division_preview = None  # (r1, c1, r2, c2) while drawing a division
         self.selected_division = -1  # index of selected division, or -1
-        self.selected_id = None  # highlighted component id
+        self.selected_ids = set()  # highlighted component ids
+        self.selection_rect = None    # (x0,y0,x1,y1) canvas coords for rubber-band, or None
+        self.multi_ghost = None       # list of (comp_def, row, col, rot, valid) or None
         self.show_labels = True
         self.show_grid = True
+        self.selected_text_label_id = None  # id of selected free text label
+        self._text_label_bboxes = {}        # id -> (x0,y0,x1,y1) canvas bbox
+        self.text_label_ghost = None        # dict of props when placing a new text label
+        self.text_label_ghost_pos = (0.0, 0.0)  # (row_f, col_f) cursor position
         # Label modes: 'num' (1,2,3...) or 'alpha' (A,B,C...)
         self.row_label_mode = 'num'
         self.col_label_mode = 'num'
@@ -244,22 +250,64 @@ class BoardRenderer:
                                     fill=COLOR_GUIDE_PREVIEW, width=guide_width,
                                     capstyle='round', dash=(4, 4))
 
+        # Text labels below components
+        self._text_label_bboxes.clear()
+        for tl in self.board.text_labels:
+            if tl.layer == 'below':
+                self._draw_text_label(tl)
+
         # Components - layered rendering
         inner_ids = self._find_inner_components()
         # Pass 1: All bodies (semi-transparent)
         for comp_id, pc in self.board.components.items():
-            self._draw_component_body(pc, highlight=(comp_id == self.selected_id))
+            self._draw_component_body(pc, highlight=(comp_id in self.selected_ids))
         # Pass 2: Inner component bodies redrawn opaque + all pins/labels
         for comp_id, pc in self.board.components.items():
-            self._draw_component_pins(pc, highlight=(comp_id == self.selected_id),
+            self._draw_component_pins(pc, highlight=(comp_id in self.selected_ids),
                                       is_inner=(comp_id in inner_ids))
 
         # Guide segments hidden under component bodies (stippled overlay)
         self._draw_hidden_guides(guide_width)
 
-        # Ghost preview
-        if self.ghost:
+        # Text labels above components
+        for tl in self.board.text_labels:
+            if tl.layer == 'above':
+                self._draw_text_label(tl)
+
+        # Rubber-band selection rectangle
+        if self.selection_rect:
+            rx0, ry0, rx1, ry1 = self.selection_rect
+            self.canvas.create_rectangle(rx0, ry0, rx1, ry1,
+                outline='#00B0FF', fill='#00B0FF', stipple='gray25',
+                width=1, dash=(4, 3))
+
+        # Ghost preview (multi or single)
+        if self.multi_ghost:
+            for comp_def, row, col, rot, valid in self.multi_ghost:
+                self._draw_ghost(comp_def, row, col, rot, valid)
+        elif self.ghost:
             self._draw_ghost(*self.ghost)
+
+        # Text label ghost (new label being positioned)
+        if self.text_label_ghost:
+            from board import TextLabel as _TL
+            _g = self.text_label_ghost
+            tg = _TL('__ghost__', self.text_label_ghost_pos[0], self.text_label_ghost_pos[1],
+                     _g.get('text', ''))
+            tg.size = _g.get('size')
+            tg.align = _g.get('align', 'center')
+            tg.opacity = _g.get('opacity', 100)
+            tg.layer = 'above'
+            tg.color = _g.get('color', '#E0E0E0')
+            tg.bg_color = _g.get('bg_color', '#000000')
+            tg.border_color = _g.get('border_color', '')
+            tg.rotation = _g.get('rotation', 0)
+            self._draw_text_label(tg)
+            bbox = self._text_label_bboxes.get('__ghost__')
+            if bbox:
+                bx0, by0, bx1, by1 = bbox
+                self.canvas.create_rectangle(bx0, by0, bx1, by1,
+                    outline='#00B0FF', fill='', width=2, dash=(4, 3))
 
         # Row/col labels
         if self.show_labels and cell >= 10:
@@ -279,6 +327,55 @@ class BoardRenderer:
                     label = self._grid_label(c, self.board.cols, self.col_label_mode, self.col_label_dir)
                     self.canvas.create_text(lx, ly, text=label, fill=COLOR_LABEL,
                                             font=font, anchor='s')
+
+    @staticmethod
+    def _opacity_to_stipple(opacity):
+        """Map 0-100 background opacity to a Tkinter stipple string (or '' for solid)."""
+        if opacity <= 0:
+            return None      # no background drawn
+        if opacity <= 20:
+            return 'gray12'
+        if opacity <= 40:
+            return 'gray25'
+        if opacity <= 60:
+            return 'gray50'
+        if opacity <= 80:
+            return 'gray75'
+        return ''            # solid
+
+    def _draw_text_label(self, tl):
+        """Draw a free TextLabel on the canvas and record its bbox."""
+        cell = self.cell
+        x, y = self.grid_to_canvas(tl.row, tl.col)
+        font_size = tl.size or max(9, int(cell * 0.7))
+        # Tkinter text angle: CCW degrees. Our rotation is CW degrees.
+        tk_angle = (360 - tl.rotation) % 360
+
+        tid = self.canvas.create_text(
+            x, y, text=tl.text, fill=tl.color,
+            font=('Consolas', font_size, 'bold'),
+            justify=tl.align, anchor='center', angle=tk_angle,
+        )
+        bbox = self.canvas.bbox(tid)
+        if bbox:
+            pad = max(3, cell * 0.15)
+            bx0, by0, bx1, by1 = bbox[0]-pad, bbox[1]-pad, bbox[2]+pad, bbox[3]+pad
+            stipple = self._opacity_to_stipple(tl.opacity)
+            if stipple is not None:
+                kw = {'fill': tl.bg_color, 'outline': ''}
+                if stipple:
+                    kw['stipple'] = stipple
+                self.canvas.create_rectangle(bx0, by0, bx1, by1, **kw)
+            # Border
+            if tl.border_color:
+                self.canvas.create_rectangle(bx0, by0, bx1, by1,
+                    outline=tl.border_color, fill='', width=1)
+            # Selection highlight
+            if tl.id == self.selected_text_label_id:
+                self.canvas.create_rectangle(bx0, by0, bx1, by1,
+                    outline='#00B0FF', fill='', width=2)
+            self.canvas.tag_raise(tid)
+            self._text_label_bboxes[tl.id] = (bx0, by0, bx1, by1)
 
     def _draw_component_body(self, pc, highlight=False):
         """Draw component body (semi-transparent, rendered first so pins go on top)."""
@@ -368,14 +465,17 @@ class BoardRenderer:
                 rows_span = max(r for r, c in all_cells) - min(r for r, c in all_cells) + 1
                 cols_span = max(c for r, c in all_cells) - min(c for r, c in all_cells) + 1
                 min_span = min(rows_span, cols_span)
-                if min_span <= 2:
+                if pc.label_size:
+                    font_size = pc.label_size
+                elif min_span <= 2:
                     font_size = max(6, int(cell * 0.4))
                 else:
                     font_size = max(9, int(cell * 0.7))
                 text_angle = 90 if pc.rotation in (90, 270) else 0
                 tid = self.canvas.create_text(
                     lx, ly, text=display_text, fill=COLOR_TEXT,
-                    font=('Consolas', font_size, 'bold'), angle=text_angle
+                    font=('Consolas', font_size, 'bold'), angle=text_angle,
+                    justify=getattr(pc, 'label_align', 'center'),
                 )
                 # Opaque background behind text for readability
                 bbox = self.canvas.bbox(tid)
