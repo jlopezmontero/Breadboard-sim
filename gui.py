@@ -553,7 +553,7 @@ class LabelEditDialog(tk.Toplevel):
     """Custom dialog for editing a component label (multi-line), font size and alignment."""
 
     def __init__(self, parent, title, prompt, initial_text='',
-                 initial_size=None, initial_align='center'):
+                 initial_size=None, initial_align='center', select_all=True):
         super().__init__(parent)
         self.result_text = None   # None = cancelled
         self.result_size = None
@@ -579,11 +579,14 @@ class LabelEditDialog(tk.Toplevel):
         sb.pack(side='right', fill='y')
         if initial_text:
             self._text.insert('1.0', initial_text)
-        self._text.tag_add('sel', '1.0', 'end')
+        if select_all:
+            self._text.tag_add('sel', '1.0', 'end')
+        else:
+            self._text.mark_set('insert', 'end')
         self._text.focus_set()
 
         # Hint
-        tk.Label(self, text='Enter = new line    Ctrl+Enter = confirm',
+        tk.Label(self, text='Enter = confirm    Ctrl+Enter = new line',
                  fg='#888888', font=('TkDefaultFont', 8)).pack(
             anchor='w', padx=10)
 
@@ -611,7 +614,8 @@ class LabelEditDialog(tk.Toplevel):
         tk.Button(btn_frame, text='Cancel', command=self.destroy, width=9).pack(side='right', padx=2)
 
         self.bind('<Escape>', lambda e: self.destroy())
-        self._text.bind('<Control-Return>', lambda e: self._ok())
+        self._text.bind('<Return>', lambda e: (self._ok(), 'break')[1])
+        self._text.bind('<Control-Return>', lambda e: self._text.insert('insert', '\n') or 'break')
 
         # Centre over parent
         self.update_idletasks()
@@ -668,11 +672,15 @@ class TextLabelDialog(tk.Toplevel):
         self._text.config(yscrollcommand=sb.set)
         self._text.pack(side='left', fill='both', expand=True)
         sb.pack(side='right', fill='y')
-        if initial.get('text'):
+        has_text = bool(initial.get('text'))
+        if has_text:
             self._text.insert('1.0', initial['text'])
-        self._text.tag_add('sel', '1.0', 'end')
+        if not has_text:
+            self._text.tag_add('sel', '1.0', 'end')
+        else:
+            self._text.mark_set('insert', 'end')
         self._text.focus_set()
-        tk.Label(self, text='Enter = new line    Ctrl+Enter = confirm',
+        tk.Label(self, text='Enter = confirm    Ctrl+Enter = new line',
                  fg='#888888', font=('TkDefaultFont', 8)).pack(anchor='w', padx=10)
 
         # Row 1: size + alignment
@@ -765,7 +773,8 @@ class TextLabelDialog(tk.Toplevel):
         tk.Button(bf, text='Cancel', command=self.destroy, width=9).pack(side='right', padx=2)
 
         self.bind('<Escape>', lambda e: self.destroy())
-        self._text.bind('<Control-Return>', lambda e: self._ok())
+        self._text.bind('<Return>', lambda e: (self._ok(), 'break')[1])
+        self._text.bind('<Control-Return>', lambda e: self._text.insert('insert', '\n') or 'break')
 
         self.update_idletasks()
         pw, ph = parent.winfo_width(), parent.winfo_height()
@@ -1037,7 +1046,7 @@ class BreadboardApp:
         # Statusbar: left (context) + right (coordinates)
         status_frame = ttk.Frame(self.root, relief=tk.SUNKEN, borderwidth=1)
         status_frame.pack(fill=tk.X, side=tk.BOTTOM)
-        self.statusbar = ttk.Label(status_frame, text="Ready", anchor='w')
+        self.statusbar = ttk.Label(status_frame, text="Ready\n", anchor='w')
         self.statusbar.pack(side=tk.LEFT, fill=tk.X, expand=True)
         self._coord_bar = ttk.Label(status_frame, text="", anchor='e')
         self._coord_bar.pack(side=tk.RIGHT)
@@ -1254,6 +1263,7 @@ class BreadboardApp:
             initial_text=pc.label or pc.id,
             initial_size=pc.label_size,
             initial_align=pc.label_align,
+            select_all=pc.label is None,
         )
         if dlg.result_text is not None:
             new_label = dlg.result_text.strip() or None
@@ -1556,11 +1566,12 @@ class BreadboardApp:
                 if (event.x - sx) ** 2 + (event.y - sy) ** 2 < 25:
                     return
                 self._drag_started_moving = True
-            row, col = self.renderer.canvas_to_grid(event.x, event.y)
-            row, col = self._clamp_to_board(row, col)
+            row_f, col_f = self.renderer.canvas_to_grid_float(event.x, event.y)
             # Delta: cursor represents the group centroid / anchor-component center
-            dr = round(row - self._drag_orig_center_row)
-            dc = round(col - self._drag_orig_center_col)
+            # Use math.floor(x+0.5) instead of round() to avoid Python banker's
+            # rounding which causes 2-pad jumps when center is at .5 positions.
+            dr = math.floor(row_f - self._drag_orig_center_row + 0.5)
+            dc = math.floor(col_f - self._drag_orig_center_col + 0.5)
             for cid, (orig_r, orig_c) in self._drag_orig_positions.items():
                 pc = self.board.components.get(cid)
                 if pc:
@@ -1856,7 +1867,7 @@ class BreadboardApp:
             return round(center_r), round(center_c)
         mean_dr = sum(r for r, c in cells) / len(cells)
         mean_dc = sum(c for r, c in cells) / len(cells)
-        return round(center_r - mean_dr), round(center_c - mean_dc)
+        return math.floor(center_r - mean_dr + 0.5), math.floor(center_c - mean_dc + 0.5)
 
     # ── Rotate ──
 
@@ -2715,11 +2726,14 @@ class BreadboardApp:
         return rl, cl
 
     def _update_status(self, text=None):
-        if text:
-            self.statusbar.config(text=text)
-        else:
+        if not text:
             mode_text = {'SELECT': 'Select mode', 'PLACE': 'Place mode',
                          'WIRE': 'Wire mode - click start pad',
                          'DIVIDE': 'Divide mode - click start edge',
                          'DELETE': 'Delete mode'}
-            self.statusbar.config(text=mode_text.get(self.mode, 'Ready'))
+            text = mode_text.get(self.mode, 'Ready')
+        # Pad to exactly 2 lines so the statusbar height stays fixed
+        lines = text.split('\n')
+        while len(lines) < 2:
+            lines.append('')
+        self.statusbar.config(text='\n'.join(lines[:2]))
