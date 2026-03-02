@@ -8,15 +8,17 @@ Herramienta de visualizacion y planificacion de layouts en perfboard (placa perf
 
 - **Biblioteca de componentes extensible**: DIP ICs, pasivos (resistencias, capacitores, cristales), semiconductores (transistores, diodos, LEDs), modulos y conectores. Componentes extra definibles via JSON en `library/`.
 - **Modos de interaccion**: Select, Place, Wire, Divide y Delete. Cambio rapido por teclado o barra de herramientas.
+- **Multi-seleccion**: Ctrl+click para toggle, arrastre sobre area vacia para rubber-band, Ctrl+A para seleccionar todo. Operaciones grupales (mover, borrar, rotar) con undo/redo como accion unica.
 - **Guias de cableado (wires)**: Dibuja conexiones entre pads con colores configurables. Las guias se dividen automaticamente en intersecciones y pads ocupados.
 - **Lineas de division**: Marca zonas del board con lineas verdes entre pads (power rails, secciones logicas, etc.).
-- **Undo / Redo ilimitado**: Todas las operaciones (colocar, mover, borrar, cables, divisiones) son reversibles.
+- **Undo / Redo ilimitado**: Todas las operaciones (colocar, mover, borrar, cables, divisiones, etiquetas) son reversibles.
 - **Zoom y pan fluidos**: Mousewheel para zoom centrado en cursor, arrastre con boton medio o derecho para pan. Tecla `F` para ajustar el board a la ventana.
-- **Ghost preview**: Al colocar componentes se muestra una preview verde (posicion valida) o roja (colision).
-- **Rotacion**: Cualquier componente se rota en pasos de 90° con `R` antes o despues de colocar.
-- **Etiquetas**: Cada componente tiene un label editable (doble click). Se muestra sobre el componente en el canvas.
+- **Ghost preview**: Al colocar componentes se muestra una preview verde (posicion valida) o roja (colision). Rotacion grupal entra en modo flotante (multi-ghost) cuando hay colision.
+- **Rotacion**: Cualquier componente se rota en pasos de 90° con `R` antes o despues de colocar. Si la rotacion causa colision, el componente entra en modo flotante para reposicionar.
+- **Etiquetas de componente**: Cada componente tiene un label editable (doble click) con soporte multi-linea, tamano de fuente configurable y alineacion (izquierda, centro, derecha).
+- **Etiquetas de texto libre**: Anotaciones flotantes independientes de componentes. Soportan multi-linea, tamano de fuente, alineacion, opacidad de fondo, capa (encima/debajo de componentes), color de texto, color de fondo, color de borde y rotacion.
 - **Divisiones del board**: Separa visualmente el board en zonas con lineas horizontales o verticales movibles.
-- **Formato .bbsim**: Archivos JSON legibles y editables manualmente. Incluye version, dimensiones, componentes, guias y divisiones.
+- **Formato .bbsim**: Archivos JSON legibles y editables manualmente. Incluye version, dimensiones, componentes, guias, divisiones y etiquetas de texto.
 - **Presets de board**: Tamanios predefinidos o dimensiones custom de 5x5 a 200x200 pads.
 - **Instancia unica por archivo**: No se puede abrir el mismo `.bbsim` dos veces; si ya esta abierto, la ventana existente se activa automaticamente.
 - **Exportacion PNG**: Menu File > Export PNG (requiere Pillow).
@@ -45,30 +47,34 @@ python main.py layout.bbsim # Abrir archivo existente
 | Tecla / Raton | Accion |
 |---------------|--------|
 | Click izq. | Seleccionar / Colocar / Borrar (segun modo) |
-| Doble click | Editar etiqueta del componente |
+| Ctrl + click | Toggle seleccion (agregar/quitar de multi-seleccion) |
+| Arrastrar en vacio | Rubber-band: seleccionar multiples componentes por area |
+| Doble click | Editar etiqueta del componente o texto libre |
 | Click medio o derecho + arrastrar | Pan (desplazar vista) |
 | Mousewheel | Zoom centrado en cursor |
 | **W** | Modo Wire |
 | **D** | Modo Divide |
 | **X** | Modo Delete |
-| **R** | Rotar componente 90° CW |
-| **Del** | Borrar componente seleccionado |
+| **R** | Rotar componente 90° CW (entra en modo flotante si hay colision) |
+| **Del** | Borrar componente(s) seleccionado(s) |
 | **Esc** | Cancelar / volver a Select |
 | **F** | Zoom fit (ajustar al board) |
 | **+** / **-** | Zoom in / out |
+| **Ctrl+A** | Seleccionar todos los componentes |
 | **Ctrl+Z** / **Ctrl+Y** | Undo / Redo |
 | **Ctrl+S** | Guardar |
 | **Ctrl+O** | Abrir |
 | **Ctrl+N** | Nuevo board |
+| **Ctrl+R** | Rotar board 90° CW |
 | **Ctrl+Q** | Salir |
 
 ## Modos de interaccion
 
-- **Select**: Click para seleccionar, arrastrar para mover. Muestra info del componente en la barra de estado.
-- **Place**: Seleccionar componente de la palette, click para colocar. Ghost verde = valido, rojo = colision.
+- **Select**: Click para seleccionar, arrastrar para mover. Ctrl+click para toggle multi-seleccion. Arrastre en area vacia para rubber-band. Mover, borrar y rotar multiples componentes a la vez. Muestra info del componente en la barra de estado.
+- **Place**: Seleccionar componente de la palette, click para colocar. Ghost verde = valido, rojo = colision. El arrastre usa el centro visual del componente como referencia del cursor.
 - **Wire**: Click y arrastrar para trazar cables horizontales o verticales entre pads. Colores seleccionables.
 - **Divide**: Click y arrastrar para crear lineas de division entre zonas del board.
-- **Delete**: Click sobre componente o cable para eliminarlo. En cables, borra solo el segmento mas cercano al click.
+- **Delete**: Click sobre componente, cable o etiqueta de texto para eliminarlo. En cables, borra solo el segmento mas cercano al click.
 
 ## Biblioteca de componentes
 
@@ -108,7 +114,8 @@ Agrega componentes propios definiendo pins y body cells en coordenadas de grid:
     {"id": "U1", "type": "DIP-40W", "anchor_row": 5, "anchor_col": 10, "rotation": 0, "label": "W65C02S"}
   ],
   "guides": [[r1, c1, r2, c2, "#color"]],
-  "divisions": [[r1, c1, r2, c2]]
+  "divisions": [[r1, c1, r2, c2]],
+  "text_labels": [{"id": "T1", "row": 5.0, "col": 10.0, "text": "Nota", "size": 12, "align": "center", "opacity": 100, "layer": "above", "color": "#E0E0E0", "bg_color": "#000000"}]
 }
 ```
 
