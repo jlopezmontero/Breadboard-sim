@@ -92,6 +92,7 @@ class PlacedComponent:
         self.label = None           # custom display name (e.g. "Z80"), None = show id
         self.label_size = None      # font size override (int), None = auto
         self.label_align = 'center' # text alignment: 'left', 'center', 'right'
+        self.note = None            # tooltip note (string), None = no note
 
     def get_occupied_cells(self):
         """Return list of (row, col) that block placement (pins only).
@@ -132,6 +133,8 @@ class PlacedComponent:
             d['label_size'] = self.label_size
         if self.label_align != 'center':
             d['label_align'] = self.label_align
+        if self.note:
+            d['note'] = self.note
         return d
 
 
@@ -476,7 +479,7 @@ class Board:
             comp_data.append((
                 pc.id, pc.comp_def,
                 pc.anchor_row, pc.anchor_col, pc.rotation,
-                pc.label, pc.label_size, pc.label_align,
+                pc.label, pc.label_size, pc.label_align, pc.note,
             ))
         # Save guide and division state
         guide_data = [(gl.r1, gl.c1, gl.r2, gl.c2, gl.color) for gl in self.guides]
@@ -490,7 +493,7 @@ class Board:
         self.pads = [[Pad(r, c) for c in range(new_cols)] for r in range(new_rows)]
 
         # Re-place with transformed coordinates
-        for comp_id, comp_def, ar, ac, rot, label, label_size, label_align in comp_data:
+        for comp_id, comp_def, ar, ac, rot, label, label_size, label_align, note in comp_data:
             new_ar = ac
             new_ac = (old_rows - 1) - ar
             new_rot = (rot + 90) % 360
@@ -501,6 +504,8 @@ class Board:
                 if label_size is not None:
                     placed.label_size = label_size
                 placed.label_align = label_align
+                if note is not None:
+                    placed.note = note
 
         # Re-add guides with transformed coordinates
         for r1, c1, r2, c2, color in guide_data:

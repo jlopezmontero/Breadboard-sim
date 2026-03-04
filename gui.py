@@ -43,6 +43,16 @@ class Command:
     def execute(self): raise NotImplementedError
     def undo(self): raise NotImplementedError
 
+    @staticmethod
+    def _save_props(pc):
+        """Save label/note/style properties from a PlacedComponent."""
+        return (pc.label, pc.label_size, pc.label_align, pc.note)
+
+    @staticmethod
+    def _restore_props(pc, props):
+        """Restore saved properties onto a PlacedComponent."""
+        pc.label, pc.label_size, pc.label_align, pc.note = props
+
 
 class PlaceCmd(Command):
     def __init__(self, app, comp_def, row, col, rotation):
@@ -88,8 +98,11 @@ class DeleteCmd(Command):
                 self.pc_data['rotation'],
                 comp_id=self.pc_data['id'],
             )
-            if pc and 'label' in self.pc_data:
-                pc.label = self.pc_data['label']
+            if pc:
+                pc.label = self.pc_data.get('label')
+                pc.label_size = self.pc_data.get('label_size')
+                pc.label_align = self.pc_data.get('label_align', 'center')
+                pc.note = self.pc_data.get('note')
 
 
 class MoveCmd(Command):
@@ -146,11 +159,11 @@ class RotateCmd(Command):
 class ReplaceLiftedCmd(Command):
     """Place a lifted (floating) component at a new position/rotation, preserving its id and label."""
 
-    def __init__(self, app, comp_id, comp_def, label, old_row, old_col, old_rot, new_row, new_col, new_rot):
+    def __init__(self, app, comp_id, comp_def, props, old_row, old_col, old_rot, new_row, new_col, new_rot):
         self.app = app
         self.comp_id = comp_id
         self.comp_def = comp_def
-        self.label = label
+        self.props = props  # (label, label_size, label_align, note)
         self.old_row = old_row
         self.old_col = old_col
         self.old_rot = old_rot
@@ -164,8 +177,7 @@ class ReplaceLiftedCmd(Command):
             comp_id=self.comp_id,
         )
         if placed:
-            if self.label is not None:
-                placed.label = self.label
+            self._restore_props(placed, self.props)
             return True
         return False
 
@@ -175,8 +187,8 @@ class ReplaceLiftedCmd(Command):
             self.comp_def, self.old_row, self.old_col, self.old_rot,
             comp_id=self.comp_id,
         )
-        if placed and self.label is not None:
-            placed.label = self.label
+        if placed:
+            self._restore_props(placed, self.props)
 
 
 class MultiDeleteCmd(Command):
@@ -185,40 +197,41 @@ class MultiDeleteCmd(Command):
     def __init__(self, app, comp_ids):
         self.app = app
         self.comp_ids = list(comp_ids)
-        self.saved = {}  # comp_id -> (comp_def, row, col, rot, label)
+        self.saved = {}  # comp_id -> (comp_def, row, col, rot, props)
 
     def execute(self):
         for cid in self.comp_ids:
             pc = self.app.board.components.get(cid)
             if pc:
                 self.saved[cid] = (pc.comp_def, pc.anchor_row, pc.anchor_col,
-                                   pc.rotation, pc.label)
+                                   pc.rotation, self._save_props(pc))
                 self.app.board.remove_component(cid)
         return bool(self.saved)
 
     def undo(self):
-        for cid, (comp_def, row, col, rot, label) in self.saved.items():
+        for cid, (comp_def, row, col, rot, props) in self.saved.items():
             placed = self.app.board.place_component(comp_def, row, col, rot, comp_id=cid)
-            if placed and label is not None:
-                placed.label = label
+            if placed:
+                self._restore_props(placed, props)
 
 
 class MultiMoveCmd(Command):
     """Move multiple components simultaneously as one undoable action."""
 
     def __init__(self, app, entries):
-        # entries: list of (comp_id, comp_def, label, rotation, old_r, old_c, new_r, new_c)
+        # entries: list of (comp_id, comp_def, props, rotation, old_r, old_c, new_r, new_c)
+        # props = (label, label_size, label_align, note)
         self.app = app
         self.entries = entries
 
     def _place_all(self, use_new):
         for e in self.entries:
             self.app.board.remove_component(e[0])
-        for comp_id, comp_def, label, rotation, old_r, old_c, new_r, new_c in self.entries:
+        for comp_id, comp_def, props, rotation, old_r, old_c, new_r, new_c in self.entries:
             r, c = (new_r, new_c) if use_new else (old_r, old_c)
             placed = self.app.board.place_component(comp_def, r, c, rotation, comp_id=comp_id)
-            if placed and label is not None:
-                placed.label = label
+            if placed:
+                self._restore_props(placed, props)
 
     def execute(self):
         self._place_all(use_new=True)
@@ -232,18 +245,19 @@ class MultiRotateCmd(Command):
     """Rotate multiple components simultaneously as one undoable action."""
 
     def __init__(self, app, entries):
-        # entries: list of (comp_id, comp_def, label, old_r, old_c, old_rot, new_r, new_c, new_rot)
+        # entries: list of (comp_id, comp_def, props, old_r, old_c, old_rot, new_r, new_c, new_rot)
+        # props = (label, label_size, label_align, note)
         self.app = app
         self.entries = entries
 
     def _place_all(self, use_new):
         for e in self.entries:
             self.app.board.remove_component(e[0])
-        for comp_id, comp_def, label, old_r, old_c, old_rot, new_r, new_c, new_rot in self.entries:
+        for comp_id, comp_def, props, old_r, old_c, old_rot, new_r, new_c, new_rot in self.entries:
             r, c, rot = (new_r, new_c, new_rot) if use_new else (old_r, old_c, old_rot)
             placed = self.app.board.place_component(comp_def, r, c, rot, comp_id=comp_id)
-            if placed and label is not None:
-                placed.label = label
+            if placed:
+                self._restore_props(placed, props)
 
     def execute(self):
         self._place_all(use_new=True)
@@ -401,7 +415,8 @@ class MoveDivisionCmd(Command):
 class RenameCmd(Command):
     def __init__(self, app, comp_id, old_label, new_label,
                  old_size=None, new_size=None,
-                 old_align='center', new_align='center'):
+                 old_align='center', new_align='center',
+                 old_note=None, new_note=None):
         self.app = app
         self.comp_id = comp_id
         self.old_label = old_label
@@ -410,6 +425,8 @@ class RenameCmd(Command):
         self.new_size = new_size
         self.old_align = old_align
         self.new_align = new_align
+        self.old_note = old_note
+        self.new_note = new_note
 
     def execute(self):
         pc = self.app.board.components.get(self.comp_id)
@@ -417,6 +434,7 @@ class RenameCmd(Command):
             pc.label = self.new_label
             pc.label_size = self.new_size
             pc.label_align = self.new_align
+            pc.note = self.new_note
             return True
         return False
 
@@ -426,6 +444,7 @@ class RenameCmd(Command):
             pc.label = self.old_label
             pc.label_size = self.old_size
             pc.label_align = self.old_align
+            pc.note = self.old_note
 
 
 # ── Free text label commands ──
@@ -550,14 +569,16 @@ _LABEL_FONT_SIZES = ['auto', '6', '7', '8', '9', '10', '11', '12', '14',
 
 
 class LabelEditDialog(tk.Toplevel):
-    """Custom dialog for editing a component label (multi-line), font size and alignment."""
+    """Custom dialog for editing a component label (multi-line), font size, alignment and note."""
 
     def __init__(self, parent, title, prompt, initial_text='',
-                 initial_size=None, initial_align='center', select_all=True):
+                 initial_size=None, initial_align='center', select_all=True,
+                 initial_note=''):
         super().__init__(parent)
         self.result_text = None   # None = cancelled
         self.result_size = None
         self.result_align = 'center'
+        self.result_note = None
 
         self.title(title)
         self.resizable(False, False)
@@ -607,15 +628,31 @@ class LabelEditDialog(tk.Toplevel):
             tk.Radiobutton(opts_frame, text=symbol, variable=self._align_var,
                            value=val).pack(side='left', padx=2)
 
+        # Note field
+        tk.Label(self, text='Note (tooltip):', anchor='w').pack(
+            fill='x', padx=10, pady=(4, 0))
+        note_frame = tk.Frame(self)
+        note_frame.pack(fill='both', expand=True, padx=10)
+        self._note = tk.Text(note_frame, width=32, height=3, wrap='word',
+                             font=('Consolas', 10), relief='sunken', bd=1)
+        note_sb = tk.Scrollbar(note_frame, command=self._note.yview)
+        self._note.config(yscrollcommand=note_sb.set)
+        self._note.pack(side='left', fill='both', expand=True)
+        note_sb.pack(side='right', fill='y')
+        if initial_note:
+            self._note.insert('1.0', initial_note)
+
         # OK / Cancel buttons
         btn_frame = tk.Frame(self)
-        btn_frame.pack(fill='x', padx=10, pady=(0, 10))
+        btn_frame.pack(fill='x', padx=10, pady=(6, 10))
         tk.Button(btn_frame, text='OK', command=self._ok, width=9).pack(side='right', padx=2)
         tk.Button(btn_frame, text='Cancel', command=self.destroy, width=9).pack(side='right', padx=2)
 
         self.bind('<Escape>', lambda e: self.destroy())
         self._text.bind('<Return>', lambda e: (self._ok(), 'break')[1])
         self._text.bind('<Control-Return>', lambda e: self._text.insert('insert', '\n') or 'break')
+        self._note.bind('<Return>', lambda e: (self._ok(), 'break')[1])
+        self._note.bind('<Control-Return>', lambda e: self._note.insert('insert', '\n') or 'break')
 
         # Centre over parent
         self.update_idletasks()
@@ -631,6 +668,7 @@ class LabelEditDialog(tk.Toplevel):
         sv = self._size_var.get()
         self.result_size = None if sv == 'auto' else int(sv)
         self.result_align = self._align_var.get()
+        self.result_note = self._note.get('1.0', 'end-1c').strip() or None
         self.destroy()
 
 
@@ -848,7 +886,7 @@ class BreadboardApp:
         self.selected_comp_ids = set()   # set of currently selected component IDs
         self._lifted_comp_id = None    # id of component lifted for re-placement
         self._lifted_comp_def = None
-        self._lifted_comp_label = None
+        self._lifted_comp_props = None
         self._lifted_orig_row = None
         self._lifted_orig_col = None
         self._lifted_orig_rot = None
@@ -867,6 +905,7 @@ class BreadboardApp:
         self._multi_ghost_ref_row = None  # group centroid row at ghost-start
         self._multi_ghost_ref_col = None  # group centroid col at ghost-start
         self._paste_label = None     # label to apply after paste-place
+        self._paste_note = None      # note to apply after paste-place
         self._wire_color = '#FFFFFF'  # currently selected wire color
         self._wire_start = None      # (row, col) of wire start pad
         self._division_start = None  # (row, col) of division start edge point
@@ -1040,6 +1079,21 @@ class BreadboardApp:
 
         self.renderer = BoardRenderer(self.canvas, self.board)
 
+        # Tooltip for component notes
+        self._tooltip = tk.Toplevel(self.root)
+        self._tooltip.wm_overrideredirect(True)
+        self._tooltip.withdraw()
+        tooltip_frame = tk.Frame(self._tooltip, bg='#333333', bd=1, relief='solid')
+        tooltip_frame.pack(fill='both', expand=True)
+        self._tooltip_label = tk.Label(tooltip_frame, text='', bg='#FFFFDD',
+                                       fg='#222222', font=('Consolas', 9),
+                                       justify='left', wraplength=300,
+                                       padx=6, pady=4)
+        self._tooltip_label.pack()
+        self._tooltip_comp_id = None   # comp id currently showing tooltip for
+        self._tooltip_after_id = None  # pending after() id for delay
+        self._tooltip_pending_pos = None
+
         # Fix zoom fit reference
         view_menu.entryconfigure(2, command=self.renderer.zoom_fit)
 
@@ -1063,6 +1117,7 @@ class BreadboardApp:
         self.canvas.bind('<MouseWheel>', self._on_mousewheel)
         self.canvas.bind('<Configure>', lambda e: self.renderer.redraw())
         self.canvas.bind('<Enter>', lambda e: self.canvas.focus_set())
+        self.canvas.bind('<Leave>', self._on_canvas_leave)
 
     def _populate_palette(self):
         self.tree.delete(*self.tree.get_children())
@@ -1136,6 +1191,7 @@ class BreadboardApp:
             self.renderer.ghost = None
             self.renderer.multi_ghost = None
             self._paste_label = None
+            self._paste_note = None
         if self.mode != MODE_WIRE:
             self._wire_start = None
             self.renderer.guide_preview = None
@@ -1215,6 +1271,7 @@ class BreadboardApp:
             self.place_comp_def = comp
             self.place_rotation = 0
             self._paste_label = None
+            self._paste_note = None
             self._set_mode(MODE_PLACE)
             self._update_status(f"Place: {comp.name} (R to rotate)")
             self.canvas.focus_set()
@@ -1264,15 +1321,18 @@ class BreadboardApp:
             initial_size=pc.label_size,
             initial_align=pc.label_align,
             select_all=pc.label is None,
+            initial_note=pc.note or '',
         )
         if dlg.result_text is not None:
             new_label = dlg.result_text.strip() or None
             new_size = dlg.result_size
             new_align = dlg.result_align
-            old_label, old_size, old_align = pc.label, pc.label_size, pc.label_align
-            if new_label != old_label or new_size != old_size or new_align != old_align:
+            new_note = dlg.result_note
+            old_label, old_size, old_align, old_note = pc.label, pc.label_size, pc.label_align, pc.note
+            if new_label != old_label or new_size != old_size or new_align != old_align or new_note != old_note:
                 cmd = RenameCmd(self, pc.id, old_label, new_label,
-                                old_size, new_size, old_align, new_align)
+                                old_size, new_size, old_align, new_align,
+                                old_note, new_note)
                 self._execute_cmd(cmd)
                 self.renderer.redraw()
 
@@ -1306,7 +1366,7 @@ class BreadboardApp:
             for e in self._multi_ghost_entries:
                 gr = self._clamp_to_board(e['base_row'] + dr, e['base_col'] + dc)[0]
                 gc = self._clamp_to_board(e['base_row'] + dr, e['base_col'] + dc)[1]
-                entries.append((e['comp_id'], e['comp_def'], e['label'],
+                entries.append((e['comp_id'], e['comp_def'], e['props'],
                                 e['old_row'], e['old_col'], e['old_rot'],
                                 gr, gc, e['new_rot']))
             all_valid = all(
@@ -1334,7 +1394,7 @@ class BreadboardApp:
                 # Re-placing a lifted component — preserve its id and label
                 cmd = ReplaceLiftedCmd(
                     self,
-                    self._lifted_comp_id, self._lifted_comp_def, self._lifted_comp_label,
+                    self._lifted_comp_id, self._lifted_comp_def, self._lifted_comp_props,
                     self._lifted_orig_row, self._lifted_orig_col, self._lifted_orig_rot,
                     place_row, place_col, self.place_rotation,
                 )
@@ -1352,8 +1412,9 @@ class BreadboardApp:
                 cmd = PlaceCmd(self, self.place_comp_def, place_row, place_col, self.place_rotation)
                 if self._execute_cmd(cmd):
                     # Apply pasted label if present
-                    if self._paste_label and cmd.comp_id:
-                        rename = RenameCmd(self, cmd.comp_id, None, self._paste_label)
+                    if (self._paste_label or self._paste_note) and cmd.comp_id:
+                        rename = RenameCmd(self, cmd.comp_id, None, self._paste_label,
+                                           new_note=self._paste_note)
                         self._execute_cmd(rename)
                     self._update_status(f"Placed {cmd.comp_id}")
                 else:
@@ -1674,7 +1735,7 @@ class BreadboardApp:
                         pc = self.board.components.get(cid)
                         if pc:
                             new_r, new_c = self._clamp_to_board(orig_r + dr, orig_c + dc)
-                            entries.append((cid, pc.comp_def, pc.label, pc.rotation,
+                            entries.append((cid, pc.comp_def, Command._save_props(pc), pc.rotation,
                                             orig_r, orig_c, new_r, new_c))
                     # Validate: temporarily remove all, check each, restore
                     for cid, *_ in entries:
@@ -1683,10 +1744,10 @@ class BreadboardApp:
                         self.board.can_place(comp_def, new_r, new_c, rot)
                         for _, comp_def, _, rot, _, _, new_r, new_c in entries
                     )
-                    for cid, comp_def, label, rot, old_r, old_c, _, _ in entries:
+                    for cid, comp_def, props, rot, old_r, old_c, _, _ in entries:
                         placed = self.board.place_component(comp_def, old_r, old_c, rot, comp_id=cid)
-                        if placed and label is not None:
-                            placed.label = label
+                        if placed:
+                            Command._restore_props(placed, props)
                     if all_valid:
                         cmd = MultiMoveCmd(self, entries)
                         self._execute_cmd(cmd)
@@ -1790,6 +1851,55 @@ class BreadboardApp:
                 else:
                     coord_text += f"  [{occ}]"
             self._coord_bar.config(text=coord_text)
+        # Tooltip for component notes
+        self._update_tooltip(event, row, col)
+
+    def _update_tooltip(self, event, row, col):
+        """Show/hide tooltip for component notes on hover (500ms delay)."""
+        hover_id = None
+        if 0 <= row < self.board.rows and 0 <= col < self.board.cols:
+            pc = self.board.get_component_at(row, col)
+            if pc and pc.note:
+                hover_id = pc.id
+        if hover_id == self._tooltip_comp_id:
+            if hover_id is not None and self._tooltip.winfo_viewable():
+                x = event.x_root + 16
+                y = event.y_root + 12
+                self._tooltip.wm_geometry(f'+{x}+{y}')
+            return
+        # Cancel any pending tooltip timer
+        if self._tooltip_after_id is not None:
+            self.root.after_cancel(self._tooltip_after_id)
+            self._tooltip_after_id = None
+        if hover_id is None:
+            self._tooltip.withdraw()
+            self._tooltip_comp_id = None
+        else:
+            self._tooltip.withdraw()
+            self._tooltip_comp_id = hover_id
+            self._tooltip_pending_pos = (event.x_root + 16, event.y_root + 12)
+            self._tooltip_after_id = self.root.after(500, self._show_tooltip)
+
+    def _on_canvas_leave(self, event):
+        if self._tooltip_after_id is not None:
+            self.root.after_cancel(self._tooltip_after_id)
+            self._tooltip_after_id = None
+        self._tooltip.withdraw()
+        self._tooltip_comp_id = None
+
+    def _show_tooltip(self):
+        """Called after delay to actually display the tooltip."""
+        self._tooltip_after_id = None
+        if self._tooltip_comp_id is None:
+            return
+        pc = self.board.components.get(self._tooltip_comp_id)
+        if not pc or not pc.note:
+            return
+        self._tooltip_label.config(text=pc.note)
+        x, y = self._tooltip_pending_pos
+        self._tooltip.wm_geometry(f'+{x}+{y}')
+        self._tooltip.deiconify()
+        self._tooltip.lift()
 
     def _on_mousewheel(self, event):
         # Windows: event.delta is +/-120
@@ -1925,7 +2035,7 @@ class BreadboardApp:
                 ctr_r, ctr_c = self._component_center(pc)
                 new_ar, new_ac = self._center_rot_anchor(pc.comp_def, ctr_r, ctr_c, new_rot)
                 if self.board.can_place(pc.comp_def, new_ar, new_ac, new_rot, exclude_id=cid):
-                    entry = (cid, pc.comp_def, pc.label,
+                    entry = (cid, pc.comp_def, Command._save_props(pc),
                              pc.anchor_row, pc.anchor_col, pc.rotation,
                              new_ar, new_ac, new_rot)
                     self._execute_cmd(MultiRotateCmd(self, [entry]))
@@ -1948,12 +2058,12 @@ class BreadboardApp:
                 # Temporarily remove all to check placement
                 saved = {}
                 for cid, pc in valid_pcs:
-                    saved[cid] = (pc.comp_def, pc.label, pc.anchor_row, pc.anchor_col, pc.rotation)
+                    saved[cid] = (pc.comp_def, Command._save_props(pc), pc.anchor_row, pc.anchor_col, pc.rotation)
                     self.board.remove_component(cid)
                 # Compute new position for each: rotate its visual center around group centroid
                 new_states = {}
                 for cid, pc in valid_pcs:
-                    comp_def, label, old_r, old_c, old_rot = saved[cid]
+                    comp_def, props, old_r, old_c, old_rot = saved[cid]
                     dr = comp_centers[cid][0] - gr_cr
                     dc = comp_centers[cid][1] - gr_cc
                     new_ctr_r = gr_cr + dc   # 90° CW: (dr,dc) → (dc,-dr)
@@ -1966,10 +2076,10 @@ class BreadboardApp:
                     for cid, ns in new_states.items()
                 )
                 # Restore all to original positions
-                for cid, (comp_def, label, old_r, old_c, old_rot) in saved.items():
+                for cid, (comp_def, props, old_r, old_c, old_rot) in saved.items():
                     placed = self.board.place_component(comp_def, old_r, old_c, old_rot, comp_id=cid)
-                    if placed and label is not None:
-                        placed.label = label
+                    if placed:
+                        Command._restore_props(placed, props)
                 if can_all_fit:
                     rot_entries = [
                         (cid, saved[cid][0], saved[cid][1],
@@ -1995,7 +2105,7 @@ class BreadboardApp:
             return
         self._lifted_comp_id = pc.id
         self._lifted_comp_def = pc.comp_def
-        self._lifted_comp_label = pc.label
+        self._lifted_comp_props = Command._save_props(pc)
         self._lifted_orig_row = pc.anchor_row
         self._lifted_orig_col = pc.anchor_col
         self._lifted_orig_rot = pc.rotation
@@ -2003,6 +2113,7 @@ class BreadboardApp:
         self.place_comp_def = pc.comp_def
         self.place_rotation = (pc.rotation + 90) % 360
         self._paste_label = None
+        self._paste_note = None
         self.mode = MODE_PLACE
         self._mode_var.set(MODE_PLACE)
         # Show ghost at the specified position (center-preserving if provided)
@@ -2016,7 +2127,7 @@ class BreadboardApp:
     def _clear_lifted(self):
         self._lifted_comp_id = None
         self._lifted_comp_def = None
-        self._lifted_comp_label = None
+        self._lifted_comp_props = None
         self._lifted_orig_row = None
         self._lifted_orig_col = None
         self._lifted_orig_rot = None
@@ -2030,8 +2141,8 @@ class BreadboardApp:
             self._lifted_orig_row, self._lifted_orig_col, self._lifted_orig_rot,
             comp_id=self._lifted_comp_id,
         )
-        if placed and self._lifted_comp_label is not None:
-            placed.label = self._lifted_comp_label
+        if placed and self._lifted_comp_props is not None:
+            Command._restore_props(placed, self._lifted_comp_props)
         self._clear_lifted()
 
     # ── Selection helpers ──
@@ -2075,7 +2186,7 @@ class BreadboardApp:
                 entries.append({
                     'comp_id': cid,
                     'comp_def': pc.comp_def,
-                    'label': pc.label,
+                    'props': Command._save_props(pc),
                     'old_row': pc.anchor_row,
                     'old_col': pc.anchor_col,
                     'old_rot': pc.rotation,
@@ -2120,8 +2231,8 @@ class BreadboardApp:
                 e['comp_def'], e['old_row'], e['old_col'], e['old_rot'],
                 comp_id=e['comp_id']
             )
-            if placed and e['label'] is not None:
-                placed.label = e['label']
+            if placed:
+                Command._restore_props(placed, e['props'])
         self._clear_multi_ghost()
 
     # ── Undo/Redo ──
@@ -2224,7 +2335,7 @@ class BreadboardApp:
                 if pc:
                     new_r = pc.anchor_row + dr
                     new_c = pc.anchor_col + dc
-                    entries.append((cid, pc.comp_def, pc.label, pc.rotation,
+                    entries.append((cid, pc.comp_def, Command._save_props(pc), pc.rotation,
                                     pc.anchor_row, pc.anchor_col, new_r, new_c))
             if not entries:
                 return
@@ -2235,10 +2346,10 @@ class BreadboardApp:
                 self.board.can_place(comp_def, new_r, new_c, rot)
                 for _, comp_def, _, rot, _, _, new_r, new_c in entries
             )
-            for cid, comp_def, label, rot, old_r, old_c, _, _ in entries:
+            for cid, comp_def, props, rot, old_r, old_c, _, _ in entries:
                 placed = self.board.place_component(comp_def, old_r, old_c, rot, comp_id=cid)
-                if placed and label is not None:
-                    placed.label = label
+                if placed:
+                    Command._restore_props(placed, props)
             if all_valid:
                 cmd = MultiMoveCmd(self, entries)
                 self._execute_cmd(cmd)
@@ -2306,6 +2417,7 @@ class BreadboardApp:
         self.place_comp_def = comp_def
         self.place_rotation = data.get('rotation', 0)
         self._paste_label = data.get('label')
+        self._paste_note = data.get('note')
         self._set_mode(MODE_PLACE)
         self._update_status(f"Paste: {comp_def.name} (click to place)")
         self.canvas.focus_set()

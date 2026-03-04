@@ -15,7 +15,7 @@ Herramienta de visualizacion y planificacion de layouts en perfboard (placa perf
 - **Zoom y pan fluidos**: Mousewheel para zoom centrado en cursor, arrastre con boton medio o derecho para pan. Tecla `F` para ajustar el board a la ventana.
 - **Ghost preview**: Al colocar componentes se muestra una preview verde (posicion valida) o roja (colision). Rotacion grupal entra en modo flotante (multi-ghost) cuando hay colision.
 - **Rotacion**: Cualquier componente se rota en pasos de 90° con `R` antes o despues de colocar. Si la rotacion causa colision, el componente entra en modo flotante para reposicionar.
-- **Etiquetas de componente**: Cada componente tiene un label editable (doble click) con soporte multi-linea, tamano de fuente configurable y alineacion (izquierda, centro, derecha).
+- **Etiquetas de componente**: Cada componente tiene un label editable (doble click) con soporte multi-linea, tamano de fuente configurable y alineacion (izquierda, centro, derecha). Opcionalmente, cada componente puede tener una nota que aparece como tooltip al pasar el raton sobre el (editable desde el mismo dialogo de etiqueta, soporta multi-linea con Ctrl+Enter).
 - **Etiquetas de texto libre**: Anotaciones flotantes independientes de componentes. Soportan multi-linea, tamano de fuente, alineacion, opacidad de fondo, capa (encima/debajo de componentes), color de texto, color de fondo, color de borde y rotacion.
 - **Divisiones del board**: Separa visualmente el board en zonas con lineas horizontales o verticales movibles.
 - **Formato .bbsim**: Archivos JSON legibles y editables manualmente. Incluye version, dimensiones, componentes, guias, divisiones y etiquetas de texto.
@@ -49,7 +49,7 @@ python main.py layout.bbsim # Abrir archivo existente
 | Click izq. | Seleccionar / Colocar / Borrar (segun modo) |
 | Ctrl + click | Toggle seleccion (agregar/quitar de multi-seleccion) |
 | Arrastrar en vacio | Rubber-band: seleccionar multiples componentes por area |
-| Doble click | Editar etiqueta del componente o texto libre |
+| Doble click | Editar etiqueta y nota del componente, o texto libre |
 | Click medio o derecho + arrastrar | Pan (desplazar vista) |
 | Mousewheel | Zoom centrado en cursor |
 | **W** | Modo Wire |
@@ -111,7 +111,7 @@ Agrega componentes propios definiendo pins y body cells en coordenadas de grid:
   "version": 1,
   "board": {"rows": 57, "cols": 74, "title": "", "label_config": {}},
   "components": [
-    {"id": "U1", "type": "DIP-40W", "anchor_row": 5, "anchor_col": 10, "rotation": 0, "label": "W65C02S"}
+    {"id": "U1", "type": "DIP-40W", "anchor_row": 5, "anchor_col": 10, "rotation": 0, "label": "W65C02S", "note": "CPU principal"}
   ],
   "guides": [[r1, c1, r2, c2, "#color"]],
   "divisions": [[r1, c1, r2, c2]],

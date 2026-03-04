@@ -52,6 +52,8 @@ def load_board(filepath, library):
                 pc.label_size = comp_data['label_size']
             if comp_data.get('label_align'):
                 pc.label_align = comp_data['label_align']
+            if comp_data.get('note'):
+                pc.note = comp_data['note']
 
     for gl_data in data.get('guides', []):
         board.guides.append(GuideLine.from_dict(gl_data))
